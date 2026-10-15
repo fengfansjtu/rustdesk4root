@@ -72,7 +72,10 @@ jobs:
             cmake \
             curl \
             gcc \
+            gcc-multilib \
             g++ \
+            g++-multilib \
+            git \
             libayatana-appindicator3-dev \
             libasound2-dev \
             libc6-dev \
@@ -154,6 +157,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          rustup target add aarch64-linux-android
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           ./flutter/ndk_arm64.sh
           mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
