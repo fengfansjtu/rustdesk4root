@@ -14,8 +14,10 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.app.PendingIntent.FLAG_IMMUTABLE
 import android.app.PendingIntent.FLAG_UPDATE_CURRENT
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
@@ -69,8 +71,8 @@ class MainService : Service() {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isScreenLocked = keyguardManager?.isKeyguardLocked == true
 
-        // turn on screen with LEFT_DOWN when screen off
-        if (!powerManager.isInteractive && (kind == 0 || mask == LEFT_DOWN)) {
+        // turn on screen when screen off
+        if (!powerManager.isInteractive) {
             if (wakeLock.isHeld) {
                 Log.d(logTag, "Turn on Screen, WakeLock release")
                 wakeLock.release()
@@ -79,26 +81,27 @@ class MainService : Service() {
             wakeLock.acquire(5000)
             if (RootInputManager.isRootAvailable()) {
                 RootInputManager.wakeAndDismissKeyguard()
+                scheduleCapturePipelineRefresh(200)
             }
-        } else {
-            val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
-            when (kind) {
-                0 -> { // touch
-                    if (useRoot) {
-                        RootInputManager.onTouchInput(mask, x, y)
-                    } else {
-                        InputService.ctx?.onTouchInput(mask, x, y)
-                    }
+        }
+
+        val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
+        when (kind) {
+            0 -> { // touch
+                if (useRoot) {
+                    RootInputManager.onTouchInput(mask, x, y)
+                } else {
+                    InputService.ctx?.onTouchInput(mask, x, y)
                 }
-                1 -> { // mouse
-                    if (useRoot) {
-                        RootInputManager.onMouseInput(mask, x, y)
-                    } else {
-                        InputService.ctx?.onMouseInput(mask, x, y)
-                    }
+            }
+            1 -> { // mouse
+                if (useRoot) {
+                    RootInputManager.onMouseInput(mask, x, y)
+                } else {
+                    InputService.ctx?.onMouseInput(mask, x, y)
                 }
-                else -> {
-                }
+            }
+            else -> {
             }
         }
     }
@@ -106,6 +109,16 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustKeyEventInput(input: ByteArray) {
+        if (!powerManager.isInteractive) {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+            }
+            wakeLock.acquire(5000)
+            if (RootInputManager.isRootAvailable()) {
+                RootInputManager.wakeAndDismissKeyguard()
+                scheduleCapturePipelineRefresh(200)
+            }
+        }
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isScreenLocked = keyguardManager?.isKeyguardLocked == true
         val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
@@ -263,6 +276,78 @@ class MainService : Service() {
     private lateinit var notificationChannel: String
     private lateinit var notificationBuilder: NotificationCompat.Builder
 
+    private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var screenStateReceiverRegistered = false
+
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    Log.d(logTag, "Screen turned OFF (ACTION_SCREEN_OFF)")
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    Log.d(logTag, "Screen turned ON (ACTION_SCREEN_ON)")
+                    if (isStart) {
+                        scheduleCapturePipelineRefresh(150)
+                    }
+                }
+                Intent.ACTION_USER_PRESENT -> {
+                    Log.d(logTag, "Device UNLOCKED (ACTION_USER_PRESENT)")
+                    if (isStart) {
+                        scheduleCapturePipelineRefresh(100)
+                    }
+                }
+            }
+        }
+    }
+
+    private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
+        override fun onPaused() {
+            Log.d(logTag, "VirtualDisplay onPaused")
+        }
+
+        override fun onResumed() {
+            Log.d(logTag, "VirtualDisplay onResumed")
+            if (isStart) {
+                scheduleCapturePipelineRefresh(100)
+            }
+        }
+
+        override fun onStopped() {
+            Log.d(logTag, "VirtualDisplay onStopped")
+        }
+    }
+
+    private val refreshPipelineRunnable = Runnable {
+        refreshCapturePipeline()
+    }
+
+    private fun scheduleCapturePipelineRefresh(delayMs: Long = 100) {
+        serviceHandler?.removeCallbacks(refreshPipelineRunnable)
+        serviceHandler?.postDelayed(refreshPipelineRunnable, delayMs)
+    }
+
+    @Synchronized
+    private fun acquireCpuWakeLock() {
+        if (cpuWakeLock == null) {
+            cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rustdesk:cpu_wakelock").apply {
+                setReferenceCounted(false)
+            }
+        }
+        if (cpuWakeLock?.isHeld == false) {
+            cpuWakeLock?.acquire()
+            Log.d(logTag, "Acquired cpuWakeLock for active capture session")
+        }
+    }
+
+    @Synchronized
+    private fun releaseCpuWakeLock() {
+        if (cpuWakeLock?.isHeld == true) {
+            cpuWakeLock?.release()
+            Log.d(logTag, "Released cpuWakeLock")
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
@@ -275,6 +360,14 @@ class MainService : Service() {
         updateScreenInfo(resources.configuration.orientation)
         initNotification()
 
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        registerReceiver(screenStateReceiver, filter)
+        screenStateReceiverRegistered = true
+
         // keep the config dir same with flutter
         val prefs = applicationContext.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
         val configPath = prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: ""
@@ -286,6 +379,13 @@ class MainService : Service() {
     }
 
     override fun onDestroy() {
+        if (screenStateReceiverRegistered) {
+            try {
+                unregisterReceiver(screenStateReceiver)
+            } catch (ignored: Exception) {}
+            screenStateReceiverRegistered = false
+        }
+        releaseCpuWakeLock()
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
@@ -427,17 +527,22 @@ class MainService : Service() {
                     PixelFormat.RGBA_8888,
                     4
                 ).apply {
-                    setOnImageAvailableListener({ imageReader: ImageReader ->
+                    setOnImageAvailableListener({ reader: ImageReader ->
                         try {
                             // If not call acquireLatestImage, listener will not be called again
-                            imageReader.acquireLatestImage().use { image ->
-                                if (image == null || !isStart) return@setOnImageAvailableListener
-                                val planes = image.planes
+                            val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                            image.use { img ->
+                                if (!isStart) return@use
+                                val planes = img.planes
                                 val buffer = planes[0].buffer
                                 buffer.rewind()
                                 FFI.onVideoFrameUpdate(buffer)
                             }
-                        } catch (ignored: java.lang.Exception) {
+                        } catch (e: Exception) {
+                            Log.w(logTag, "onImageAvailable error: ${e.message}")
+                            if (e is IllegalStateException && isStart) {
+                                scheduleCapturePipelineRefresh(100)
+                            }
                         }
                     }, serviceHandler)
                 }
@@ -638,6 +743,7 @@ class MainService : Service() {
         _isStart = true
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
+        acquireCpuWakeLock()
         return true
     }
 
@@ -662,6 +768,7 @@ class MainService : Service() {
         FFI.setFrameRawEnable("video",false)
         _isStart = false
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
+        releaseCpuWakeLock()
         // release video
         if (reuseVirtualDisplay) {
             // The virtual display video projection can be paused by calling `setSurface(null)`.
@@ -715,6 +822,7 @@ class MainService : Service() {
         stopForeground(true)
         stopService(Intent(this, FloatingWindowService::class.java))
         stopSelf()
+        releaseCpuWakeLock()
         RootInputManager.destroy()
     }
 
@@ -771,7 +879,7 @@ class MainService : Service() {
                 val display = mp.createVirtualDisplay(
                     "RustDeskVD",
                     SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    s, null, null
+                    s, virtualDisplayCallback, serviceHandler
                 )
                 if (display == null) {
                     Log.e(logTag, "createOrSetVirtualDisplay failed")
@@ -784,6 +892,79 @@ class MainService : Service() {
         } catch (e: SecurityException) {
             Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException", e)
             handleVirtualDisplayFailure()
+        }
+    }
+
+    @Synchronized
+    fun refreshCapturePipeline() {
+        if (!isStart) {
+            Log.d(logTag, "refreshCapturePipeline skipped: isStart is false")
+            return
+        }
+        val mp = mediaProjection
+        if (mp == null) {
+            Log.w(logTag, "refreshCapturePipeline: mediaProjection is null, attempting recovery")
+            if (RootInputManager.isRootAvailable()) {
+                RootInputManager.grantMediaProjectionPermission(this)
+                requestMediaProjection(true)
+            }
+            return
+        }
+
+        Log.d(logTag, "refreshCapturePipeline: recovering VirtualDisplay and ImageReader...")
+        try {
+            updateScreenInfo(resources.configuration.orientation)
+
+            // Detach surface to pause/flush current buffer pipeline
+            try {
+                virtualDisplay?.setSurface(null)
+            } catch (e: Exception) {
+                Log.w(logTag, "virtualDisplay.setSurface(null) failed", e)
+            }
+
+            // Close old imageReader to abandon dead buffer queue
+            try {
+                imageReader?.close()
+            } catch (e: Exception) {
+                Log.w(logTag, "imageReader.close failed", e)
+            }
+            imageReader = null
+
+            try {
+                surface?.release()
+            } catch (e: Exception) {
+                Log.w(logTag, "surface.release failed", e)
+            }
+            surface = null
+
+            // Create new fresh ImageReader and Surface
+            val newSurface = createSurface()
+            surface = newSurface
+
+            if (newSurface != null) {
+                if (virtualDisplay != null) {
+                    try {
+                        virtualDisplay?.resize(SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi)
+                        virtualDisplay?.setSurface(newSurface)
+                        Log.d(logTag, "Attached fresh surface to existing VirtualDisplay")
+                    } catch (e: Exception) {
+                        Log.w(logTag, "setSurface failed on existing VirtualDisplay, recreating...", e)
+                        try {
+                            virtualDisplay?.release()
+                        } catch (ignored: Exception) {}
+                        virtualDisplay = null
+                        createOrSetVirtualDisplay(mp, newSurface)
+                    }
+                } else {
+                    createOrSetVirtualDisplay(mp, newSurface)
+                }
+            }
+
+            // Signal Rust capturer to refresh and expect new frames
+            FFI.refreshScreen()
+            Log.d(logTag, "refreshCapturePipeline completed successfully")
+        } catch (e: Exception) {
+            Log.e(logTag, "refreshCapturePipeline encountered error", e)
         }
     }
 
