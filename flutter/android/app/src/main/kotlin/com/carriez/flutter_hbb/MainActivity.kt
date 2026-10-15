@@ -100,7 +100,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
-        val inputPer = InputService.isOpen
+        val inputPer = InputService.isOpen || RootInputManager.isRootAvailable()
         activity.runOnUiThread {
             flutterMethodChannel?.invokeMethod(
                 "on_state_changed",
@@ -321,8 +321,18 @@ class MainActivity : FlutterActivity() {
                 }
                 START_ACTION -> {
                     if (call.arguments is String) {
-                        startAction(context, call.arguments as String)
-                        result.success(true)
+                        val action = call.arguments as String
+                        if (action == android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS && RootInputManager.isRootAvailable()) {
+                            RootInputManager.grantMediaProjectionPermission(context)
+                            Companion.flutterMethodChannel?.invokeMethod(
+                                "on_state_changed",
+                                mapOf("name" to "input", "value" to "true")
+                            )
+                            result.success(true)
+                        } else {
+                            startAction(context, action)
+                            result.success(true)
+                        }
                     } else {
                         result.success(false)
                     }
@@ -335,9 +345,10 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "check_service" -> {
+                    val inputPer = InputService.isOpen || RootInputManager.isRootAvailable()
                     Companion.flutterMethodChannel?.invokeMethod(
                         "on_state_changed",
-                        mapOf("name" to "input", "value" to InputService.isOpen.toString())
+                        mapOf("name" to "input", "value" to inputPer.toString())
                     )
                     Companion.flutterMethodChannel?.invokeMethod(
                         "on_state_changed",

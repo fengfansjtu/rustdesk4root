@@ -66,6 +66,9 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isScreenLocked = keyguardManager?.isKeyguardLocked == true
+
         // turn on screen with LEFT_DOWN when screen off
         if (!powerManager.isInteractive && (kind == 0 || mask == LEFT_DOWN)) {
             if (wakeLock.isHeld) {
@@ -74,13 +77,25 @@ class MainService : Service() {
             }
             Log.d(logTag,"Turn on Screen")
             wakeLock.acquire(5000)
+            if (RootInputManager.isRootAvailable()) {
+                RootInputManager.wakeAndDismissKeyguard()
+            }
         } else {
+            val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
             when (kind) {
                 0 -> { // touch
-                    InputService.ctx?.onTouchInput(mask, x, y)
+                    if (useRoot) {
+                        RootInputManager.onTouchInput(mask, x, y)
+                    } else {
+                        InputService.ctx?.onTouchInput(mask, x, y)
+                    }
                 }
                 1 -> { // mouse
-                    InputService.ctx?.onMouseInput(mask, x, y)
+                    if (useRoot) {
+                        RootInputManager.onMouseInput(mask, x, y)
+                    } else {
+                        InputService.ctx?.onMouseInput(mask, x, y)
+                    }
                 }
                 else -> {
                 }
@@ -91,7 +106,15 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustKeyEventInput(input: ByteArray) {
-        InputService.ctx?.onKeyEvent(input)
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isScreenLocked = keyguardManager?.isKeyguardLocked == true
+        val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
+
+        if (useRoot) {
+            RootInputManager.onKeyEvent(input)
+        } else {
+            InputService.ctx?.onKeyEvent(input)
+        }
     }
 
     @Keep
@@ -128,6 +151,10 @@ class MainService : Service() {
                         translate("Share screen")
                     }
                     if (authorized) {
+                        if (RootInputManager.isRootAvailable()) {
+                            RootInputManager.wakeAndDismissKeyguard()
+                            RootInputManager.grantMediaProjectionPermission(this@MainService)
+                        }
                         if (!isFileTransfer && !isStart) {
                             startCapture()
                         }
@@ -688,6 +715,7 @@ class MainService : Service() {
         stopForeground(true)
         stopService(Intent(this, FloatingWindowService::class.java))
         stopSelf()
+        RootInputManager.destroy()
     }
 
     fun checkMediaPermission(): Boolean {
@@ -697,10 +725,11 @@ class MainService : Service() {
                 mapOf("name" to "media", "value" to isReady.toString())
             )
         }
+        val isInputReady = InputService.isOpen || RootInputManager.isRootAvailable()
         Handler(Looper.getMainLooper()).post {
             MainActivity.flutterMethodChannel?.invokeMethod(
                 "on_state_changed",
-                mapOf("name" to "input", "value" to InputService.isOpen.toString())
+                mapOf("name" to "input", "value" to isInputReady.toString())
             )
         }
         return isReady
