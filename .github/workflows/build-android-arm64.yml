@@ -11,13 +11,28 @@ on:
         options:
           - release
           - debug
+      create_release:
+        description: 'Publish directly to GitHub Releases?'
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Release tag name (e.g. v1.5.1-root)'
+        required: false
+        default: 'v1.5.1-root'
+        type: string
   push:
     branches:
       - master
       - main
+    tags:
+      - 'v*'
     paths-ignore:
       - '**.md'
       - 'docs/**'
+
+permissions:
+  contents: write
 
 env:
   RUST_VERSION: "1.75"
@@ -161,8 +176,32 @@ jobs:
           popd
         shell: bash
 
+      - name: Prepare APK for Artifact and Release
+        run: |
+          mkdir -p release-pkg
+          cp flutter/build/app/outputs/flutter-apk/app-arm64-v8a-*.apk release-pkg/rustdesk-arm64-v8a-root.apk
+        shell: bash
+
       - name: Upload 64-bit Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-arm64-v8a-root-release
-          path: flutter/build/app/outputs/flutter-apk/app-arm64-v8a-*.apk
+          path: release-pkg/rustdesk-arm64-v8a-root.apk
+
+      - name: Publish to GitHub Releases
+        if: github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: RustDesk for Root (arm64) ${{ github.event.inputs.release_tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          files: release-pkg/rustdesk-arm64-v8a-root.apk
+          body: |
+            ### 📱 RustDesk Android 64-bit (arm64-v8a) Root 增强版
+            
+            - **目标架构**：`arm64-v8a` (64 位 Android)
+            - **无障碍脱离**：通过底层 Root 管道直接注入事件，无需开启系统无障碍服务，永不被系统查杀
+            - **锁屏远程控制**：连接或操作时自动唤醒屏幕并拉起锁屏密码盘，可直接远程输入 PIN 码或九宫格解锁
+            - **静默录屏授权**：自动授权 `PROJECT_MEDIA allow`，适配无人值守场景
+            - **控制端兼容性**：控制端使用 RustDesk 官方正式版即可，无需特殊客户端
