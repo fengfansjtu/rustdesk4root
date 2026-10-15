@@ -336,10 +336,23 @@ class ServerModel with ChangeNotifier {
     if (_inputOk) {
       parent.target?.invokeMethod("stop_input");
       bind.mainSetOption(key: kOptionEnableKeyboard, value: 'N');
+      _inputOk = false;
+      notifyListeners();
     } else {
       if (parent.target != null) {
-        /// the result of toggle-on depends on user actions in the settings page.
-        /// handle result, see [ServerModel.changeStatue]
+        try {
+          final res = await parent.target?.invokeMethod("request_root_input");
+          if (res == true) {
+            _inputOk = true;
+            bind.mainSetOption(
+                key: kOptionEnableKeyboard, value: defaultOptionYes);
+            notifyListeners();
+            return;
+          }
+        } catch (e) {
+          debugPrint("request_root_input error: $e");
+        }
+        /// fallback to accessibility dialog only if root is unavailable
         showInputWarnAlert(parent.target!);
       }
     }

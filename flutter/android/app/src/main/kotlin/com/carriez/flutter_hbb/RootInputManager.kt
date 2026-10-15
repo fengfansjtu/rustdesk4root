@@ -28,6 +28,9 @@ object RootInputManager {
     @Volatile
     private var rootAvailable: Boolean? = null
 
+    @Volatile
+    var userDisabled: Boolean = false
+
     // Touch and mouse tracking state
     private var downX = 0
     private var downY = 0
@@ -40,12 +43,42 @@ object RootInputManager {
      * Check if root (su) access is available on this device.
      */
     fun isRootAvailable(): Boolean {
-        rootAvailable?.let { return it }
-        synchronized(this) {
-            rootAvailable?.let { return it }
+        if (userDisabled) return false
+        return rootAvailable == true
+    }
+
+    /**
+     * Asynchronously check root availability without blocking UI thread.
+     */
+    fun checkRootAsync(callback: (Boolean) -> Unit) {
+        if (userDisabled) {
+            callback(false)
+            return
+        }
+        if (rootAvailable == true) {
+            callback(true)
+            return
+        }
+        executor.execute {
             val available = checkSu()
             rootAvailable = available
-            return available
+            callback(available)
+        }
+    }
+
+    /**
+     * Explicitly request root authorization from Magisk / KernelSU / APatch.
+     */
+    fun requestRoot(context: Context, callback: (Boolean) -> Unit) {
+        executor.execute {
+            userDisabled = false
+            val available = checkSu()
+            rootAvailable = available
+            if (available) {
+                grantMediaProjectionPermission(context)
+                wakeAndDismissKeyguard()
+            }
+            callback(available)
         }
     }
 
@@ -53,6 +86,7 @@ object RootInputManager {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
             val exitCode = process.waitFor()
+            Log.i(TAG, "checkSu exit code: $exitCode")
             exitCode == 0
         } catch (e: Exception) {
             Log.w(TAG, "checkSu error: ${e.message}")

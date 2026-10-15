@@ -100,12 +100,14 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
-        val inputPer = InputService.isOpen || RootInputManager.isRootAvailable()
-        activity.runOnUiThread {
-            flutterMethodChannel?.invokeMethod(
-                "on_state_changed",
-                mapOf("name" to "input", "value" to inputPer.toString())
-            )
+        RootInputManager.checkRootAsync { isRoot ->
+            val inputPer = InputService.isOpen || isRoot
+            activity.runOnUiThread {
+                flutterMethodChannel?.invokeMethod(
+                    "on_state_changed",
+                    mapOf("name" to "input", "value" to inputPer.toString())
+                )
+            }
         }
     }
 
@@ -344,12 +346,30 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "request_root_input" -> {
+                    RootInputManager.userDisabled = false
+                    RootInputManager.requestRoot(context) { granted ->
+                        runOnUiThread {
+                            if (granted) {
+                                Companion.flutterMethodChannel?.invokeMethod(
+                                    "on_state_changed",
+                                    mapOf("name" to "input", "value" to "true")
+                                )
+                            }
+                            result.success(granted)
+                        }
+                    }
+                }
                 "check_service" -> {
-                    val inputPer = InputService.isOpen || RootInputManager.isRootAvailable()
-                    Companion.flutterMethodChannel?.invokeMethod(
-                        "on_state_changed",
-                        mapOf("name" to "input", "value" to inputPer.toString())
-                    )
+                    RootInputManager.checkRootAsync { isRoot ->
+                        val inputPer = InputService.isOpen || isRoot
+                        runOnUiThread {
+                            Companion.flutterMethodChannel?.invokeMethod(
+                                "on_state_changed",
+                                mapOf("name" to "input", "value" to inputPer.toString())
+                            )
+                        }
+                    }
                     Companion.flutterMethodChannel?.invokeMethod(
                         "on_state_changed",
                         mapOf("name" to "media", "value" to MainService.isReady.toString())
@@ -357,15 +377,16 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "stop_input" -> {
+                    RootInputManager.userDisabled = true
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         InputService.ctx?.disableSelf()
                     } else {
                         InputService.ctx = null
-                        Companion.flutterMethodChannel?.invokeMethod(
-                            "on_state_changed",
-                            mapOf("name" to "input", "value" to InputService.isOpen.toString())
-                        )
                     }
+                    Companion.flutterMethodChannel?.invokeMethod(
+                        "on_state_changed",
+                        mapOf("name" to "input", "value" to "false")
+                    )
                     result.success(true)
                 }
                 "cancel_notification" -> {
