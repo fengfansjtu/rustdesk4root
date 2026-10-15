@@ -1,182 +1,83 @@
-<p align="center">
-  <img src="res/logo-header.svg" alt="RustDesk - Your remote desktop"><br>
-  <a href="#raw-steps-to-build">Build</a> •
-  <a href="#how-to-build-with-docker">Docker</a> •
-  <a href="#file-structure">Structure</a> •
-  <a href="#screenshots">Screenshots</a><br>
-  [<a href="docs/README-UA.md">Українська</a>] | [<a href="docs/README-CS.md">česky</a>] | [<a href="docs/README-ZH.md">中文</a>] | [<a href="docs/README-HU.md">Magyar</a>] | [<a href="docs/README-ES.md">Español</a>] | [<a href="docs/README-FA.md">فارسی</a>] | [<a href="docs/README-FR.md">Français</a>] | [<a href="docs/README-DE.md">Deutsch</a>] | [<a href="docs/README-PL.md">Polski</a>] | [<a href="docs/README-ID.md">Indonesian</a>] | [<a href="docs/README-FI.md">Suomi</a>] | [<a href="docs/README-ML.md">മലയാളം</a>] | [<a href="docs/README-JP.md">日本語</a>] | [<a href="docs/README-NL.md">Nederlands</a>] | [<a href="docs/README-IT.md">Italiano</a>] | [<a href="docs/README-RU.md">Русский</a>] | [<a href="docs/README-PTBR.md">Português (Brasil)</a>] | [<a href="docs/README-EO.md">Esperanto</a>] | [<a href="docs/README-KR.md">한국어</a>] | [<a href="docs/README-AR.md">العربي</a>] | [<a href="docs/README-VN.md">Tiếng Việt</a>] | [<a href="docs/README-DA.md">Dansk</a>] | [<a href="docs/README-GR.md">Ελληνικά</a>] | [<a href="docs/README-TR.md">Türkçe</a>] | [<a href="docs/README-NO.md">Norsk</a>] | [<a href="docs/README-RO.md">Română</a>]<br>
-  <b>We need your help to translate this README, <a href="https://github.com/rustdesk/rustdesk/tree/master/src/lang">RustDesk UI</a> and <a href="https://github.com/rustdesk/doc.rustdesk.com">RustDesk Doc</a> to your native language</b>
-</p>
+# RustDesk for Root (Android 64-bit)
 
-> [!Caution]
-> **Misuse Disclaimer:** <br>
-> The developers of RustDesk do not condone or support any unethical or illegal use of this software. Misuse, such as unauthorized access, control or invasion of privacy, is strictly against our guidelines. The authors are not responsible for any misuse of the application.
+> 专为已获取 **ROOT 权限** 的 Android 设备（64 位 `arm64-v8a`）打造的 RustDesk 被控端深度增强版本。  
+> **只需在被控端手机安装本版本，控制端（Windows / macOS / Linux / iOS / Android）完全继续使用官方原版即可无缝远程控制。**
 
+---
 
-Chat with us: [Discord](https://discord.gg/nDceKgxnkV) | [Twitter](https://twitter.com/rustdesk) | [Reddit](https://www.reddit.com/r/rustdesk) | [YouTube](https://www.youtube.com/@rustdesk)
+## 核心特性：与官方版本的区别
 
-[![RustDesk Server Pro](https://img.shields.io/badge/RustDesk%20Server%20Pro-Advanced%20Features-blue)](https://rustdesk.com/pricing.html)
+| 功能特性 | 官方原生版本 (Official) | Root 增强版本 (This Fork) |
+| :--- | :--- | :--- |
+| **输入控制依赖** | 强依赖系统的**“无障碍服务” (Accessibility)**。 | **完全不依赖无障碍服务**，通过底层 Root 常驻管道直接注入系统事件。 |
+| **锁屏远程控制** | **无法操作锁屏**。Android 安全策略在锁屏界面（Keyguard）会直接拦截无障碍手势。 | **支持锁屏直接控制**。Root 注入级别高于窗口安全层，可在锁屏界面点击、滑动、输入 PIN 码。 |
+| **息屏唤醒与拉起** | 仅依赖普通 WakeLock，无法自动点亮并拉起解锁界面。 | 收到连接或远程点击时，底层自动执行 `input keyevent 224` 与 `wm dismiss-keyguard` 唤醒并呈现解锁盘。 |
+| **无障碍保活问题** | 国内各大定制 ROM（MIUI、OriginOS、ColorOS 等）频繁强杀无障碍服务导致失控。 | **彻底根治失控问题**。无需开启无障碍服务，Root 注入常驻内核管道，永不失效。 |
+| **界面权限状态** | 未开启无障碍时，主页状态亮黄/红色报警，阻断正常使用提示。 | 自动探测 Root 权限；获取 Root 授权后，输入权限**自动点亮绿灯**，无需跳转设置。 |
+| **录屏授权弹窗** | 部分系统每次启动录屏均需人工手动点击“立即开始”。 | 授权连接后自动通过 `appops` 静默赋予 `PROJECT_MEDIA allow`，实现真正无人值守。 |
 
-Yet another remote desktop solution, written in Rust. Works out of the box with no configuration required. You have full control of your data, with no concerns about security. You can use our rendezvous/relay server, [set up your own](https://rustdesk.com/server), or [write your own rendezvous/relay server](https://github.com/rustdesk/rustdesk-server-demo).
+---
 
-![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
+## 工作原理解析
 
-RustDesk welcomes contribution from everyone. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for help getting started.
+### 1. 底层事件注入 (Root Input Injection)
+官方版本通过 `AccessibilityService.dispatchGesture` 模拟手势，该接口在安全窗口（如输入法密码键盘、系统锁屏界面）会被 Android 系统强制拦截。  
+本版本新增 [`RootInputManager.kt`](flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/RootInputManager.kt)，建立了一条高响应的持久化 `su` 输入管道：
+- **触控/鼠标**：将 RustDesk 的触控与鼠标事件直接转译为 `input tap`、`input swipe`。
+- **键盘事件**：直接解析按键映射为 `input keyevent <keycode>` 或 `input text`，即使锁屏状态下也能直接键入密码数字与回车。
+- **系统按键**：精准支持返回键（Back）、主页键（Home）、最近任务等。
 
-[**FAQ**](https://github.com/rustdesk/rustdesk/wiki/FAQ)
+### 2. 息屏唤醒与解锁协作
+当被控端处于锁屏或息屏状态时：
+1. 收到远程连接授权，立即申请底层亮屏锁；
+2. 执行底层唤醒命令 `input keyevent 224`（KEYCODE_WAKEUP）；
+3. 联动 `wm dismiss-keyguard` 呼出锁屏密码输入界面（若手机无密码，则直接滑动进入桌面）。
 
-[**BINARY DOWNLOAD**](https://github.com/rustdesk/rustdesk/releases)
+---
 
-[**NIGHTLY BUILD**](https://github.com/rustdesk/rustdesk/releases/tag/nightly)
+## 被控端环境建议（解决锁屏防录屏黑屏）
 
-[<img src="https://f-droid.org/badge/get-it-on.png"
-    alt="Get it on F-Droid"
-    height="80">](https://f-droid.org/en/packages/com.carriez.flutter_hbb)
-[<img src="https://flathub.org/api/badge?svg&locale=en"
-    alt="Get it on Flathub"
-    height="80">](https://flathub.org/apps/com.rustdesk.RustDesk)
+Android 系统为了保护用户隐私，在锁屏界面（输入 PIN / 密码 / 图案）默认启用了系统的 **`FLAG_SECURE`** 属性，会导致包括官方 RustDesk 在内的所有屏幕录制工具在锁屏时呈现**黑屏**。
 
-## Dependencies
+为获得完美的锁屏远程操控体验，被控手机推荐配合以下方式解除限制：
+1. **Magisk / KernelSU / APatch 模块**：
+   - 安装 **LSPosed** 框架，并在 LSPosed 仓库中激活 **Disable-FLAG_SECURE** 模块。
+   - 或直接刷入系统级的全局 **Disable FLAG_SECURE** Magisk 模块。
+2. 解除后，RustDesk 的画面采集即可无缝捕捉锁屏密码盘，控制端便能清晰看到锁屏界面并直接远程点击密码解锁。
 
-Desktop versions use Flutter or Sciter (deprecated) for GUI. This tutorial is for Sciter only, since it is easier and more friendly to start. Check out our [CI](https://github.com/rustdesk/rustdesk/blob/master/.github/workflows/flutter-build.yml) for building the Flutter version.
+---
 
-Please download Sciter dynamic library yourself.
+## 客户端兼容性说明
 
-[Windows](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
-[Linux](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so) |
-[macOS](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.osx/libsciter.dylib)
+- **控制端（电脑/手机）**：**无需使用此版本！** 请直接前往 RustDesk 官网下载官方正式版（Windows、Mac、Linux、iOS 等均可），通信协议 100% 兼容。
+- **被控端（本工程目标）**：仅需安装由本工程编译出的 64 位（`arm64-v8a`）APK，并在手机弹出的 Root 授权窗口中点击**“永久允许”**。
 
-## Raw Steps to build
+---
 
-- Prepare your Rust development env and C++ build env
+## 利用 GitHub Actions 自动编译 64 位 APK
 
-- Install [vcpkg](https://github.com/microsoft/vcpkg), and set `VCPKG_ROOT` env variable correctly
+本项目已内置独立的 GitHub Actions 自动化编译流，无需在本地配置繁琐的 NDK、Rust、Flutter 及 vcpkg 交叉编译环境。
 
-  - Windows: vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-  - Linux/macOS: vcpkg install libvpx libyuv opus aom
+### 编译文件路径
+- [`.github/workflows/build-android-arm64.yml`](.github/workflows/build-android-arm64.yml)
 
-- run `cargo run`
+### 编译触发步骤
+1. 将本仓库 Push 到你的 GitHub 个人仓库。
+2. 打开 GitHub 仓库主页，点击顶部的 **Actions** 标签页。
+3. 在左侧工作流列表中找到 **"Build Android 64-bit APK (arm64-v8a)"**。
+4. 点击右侧 **"Run workflow"** 按钮，选择分支并点击确定。
+5. 流程大约耗时 10~15 分钟（自动拉取依赖、配置 Flutter 3.24.5、NDK r28c、生成 bridge 并交叉编译 64 位底层 so 库）。
+6. 构建完成后，在当前运行记录的最下方 **Artifacts** 区域直接下载 `rustdesk-arm64-v8a-root-release.zip`，解压即可得到已自动使用 Debug 签名的 64 位 APK，可直接安装至手机。
 
-## [Build](https://rustdesk.com/docs/en/dev/build/)
+---
 
-## How to Build on Linux
+## 核心改动文件列表
 
-### Ubuntu 18 (Debian 10)
-
-```sh
-sudo apt install -y zip g++ gcc git curl wget nasm yasm libgtk-3-dev clang libxcb-randr0-dev libxdo-dev \
-        libxfixes-dev libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev libpulse-dev cmake make \
-        libclang-dev ninja-build libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-```
-
-### openSUSE Tumbleweed
-
-```sh
-sudo zypper install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libXfixes-devel cmake alsa-lib-devel gstreamer-devel gstreamer-plugins-base-devel xdotool-devel
-```
-
-### Fedora 28 (CentOS 8)
-
-```sh
-sudo yum -y install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libxdo-devel libXfixes-devel pulseaudio-libs-devel cmake alsa-lib-devel gstreamer1-devel gstreamer1-plugins-base-devel
-```
-
-### Arch (Manjaro)
-
-```sh
-sudo pacman -Syu --needed unzip git cmake gcc curl wget yasm nasm zip make pkg-config clang gtk3 xdotool libxcb libxfixes alsa-lib pipewire
-```
-
-### Install vcpkg
-
-```sh
-git clone https://github.com/microsoft/vcpkg
-cd vcpkg
-git checkout 2023.04.15
-cd ..
-vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=$HOME/vcpkg
-vcpkg/vcpkg install libvpx libyuv opus aom
-```
-
-### Fix libvpx (For Fedora)
-
-```sh
-cd vcpkg/buildtrees/libvpx/src
-cd *
-./configure
-sed -i 's/CFLAGS+=-I/CFLAGS+=-fPIC -I/g' Makefile
-sed -i 's/CXXFLAGS+=-I/CXXFLAGS+=-fPIC -I/g' Makefile
-make
-cp libvpx.a $HOME/vcpkg/installed/x64-linux/lib/
-cd
-```
-
-### Build
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-git clone --recurse-submodules https://github.com/rustdesk/rustdesk
-cd rustdesk
-mkdir -p target/debug
-wget https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so
-mv libsciter-gtk.so target/debug
-VCPKG_ROOT=$HOME/vcpkg cargo run
-```
-
-## How to build with Docker
-
-Begin by cloning the repository and building the Docker container:
-
-```sh
-git clone https://github.com/rustdesk/rustdesk
-cd rustdesk
-git submodule update --init --recursive
-docker build -t "rustdesk-builder" .
-```
-
-Then, each time you need to build the application, run the following command:
-
-```sh
-docker run --rm -it -v $PWD:/home/user/rustdesk -v rustdesk-git-cache:/home/user/.cargo/git -v rustdesk-registry-cache:/home/user/.cargo/registry -e PUID="$(id -u)" -e PGID="$(id -g)" rustdesk-builder
-```
-
-Note that the first build may take longer before dependencies are cached, subsequent builds will be faster. Additionally, if you need to specify different arguments to the build command, you may do so at the end of the command in the `<OPTIONAL-ARGS>` position. For instance, if you wanted to build an optimized release version, you would run the command above followed by `--release`. The resulting executable will be available in the target folder on your system, and can be run with:
-
-```sh
-target/debug/rustdesk
-```
-
-Or, if you're running a release executable:
-
-```sh
-target/release/rustdesk
-```
-
-Please ensure that you run these commands from the root of the RustDesk repository, or the application may not find the required resources. Also note that other cargo subcommands such as `install` or `run` are not currently supported via this method as they would install or run the program inside the container instead of the host.
-
-## File Structure
-
-- **[libs/hbb_common](https://github.com/rustdesk/rustdesk/tree/master/libs/hbb_common)**: video codec, config, tcp/udp wrapper, and some other utility functions shared with the server
-- **[libs/base](https://github.com/rustdesk/rustdesk/tree/master/libs/base)**: protobuf, fs functions for file transfer, keyboard and platform code used only by this app
-- **[libs/scrap](https://github.com/rustdesk/rustdesk/tree/master/libs/scrap)**: screen capture
-- **[libs/enigo](https://github.com/rustdesk/rustdesk/tree/master/libs/enigo)**: platform specific keyboard/mouse control
-- **[libs/clipboard](https://github.com/rustdesk/rustdesk/tree/master/libs/clipboard)**: file copy and paste implementation for Windows, Linux, macOS.
-- **[src/ui](https://github.com/rustdesk/rustdesk/tree/master/src/ui)**: obsolete Sciter UI (deprecated)
-- **[src/server](https://github.com/rustdesk/rustdesk/tree/master/src/server)**: audio/clipboard/input/video services, and network connections
-- **[src/client.rs](https://github.com/rustdesk/rustdesk/tree/master/src/client.rs)**: start a peer connection
-- **[src/rendezvous_mediator.rs](https://github.com/rustdesk/rustdesk/tree/master/src/rendezvous_mediator.rs)**: Communicate with [rustdesk-server](https://github.com/rustdesk/rustdesk-server), wait for remote direct (TCP hole punching) or relayed connection
-- **[src/platform](https://github.com/rustdesk/rustdesk/tree/master/src/platform)**: platform specific code
-- **[flutter](https://github.com/rustdesk/rustdesk/tree/master/flutter)**: Flutter code for desktop and mobile
-
-## Screenshots
-
-![Connection Manager](https://github.com/rustdesk/rustdesk/assets/28412477/db82d4e7-c4bc-4823-8e6f-6af7eadf7651)
-
-![Connected to a Windows PC](https://github.com/rustdesk/rustdesk/assets/28412477/9baa91e9-3362-4d06-aa1a-7518edcbd7ea)
-
-![File Transfer](https://github.com/rustdesk/rustdesk/assets/28412477/39511ad3-aa9a-4f8c-8947-1cce286a46ad)
-
-![TCP Tunneling](https://github.com/rustdesk/rustdesk/assets/28412477/78e8708f-e87e-4570-8373-1360033ea6c5)
-
+- [`flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/RootInputManager.kt`](flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/RootInputManager.kt)  
+  *Root 级底层输入注入、持久化 su 管道通信、锁屏唤醒与 AppOps 权限静默管理。*
+- [`flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt`](flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt)  
+  *接入 Root 输入分发拦截、连接建立时自动亮屏拉起密码盘、Root 状态自动同步。*
+- [`flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt`](flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt)  
+  *UI 权限状态联动：检测到 Root 权限时输入状态直接标绿，免去引导开启无障碍。*
+- [`.github/workflows/build-android-arm64.yml`](.github/workflows/build-android-arm64.yml)  
+  *精简且专一的 64 位 Android APK GitHub Actions 自动化编译流水线。*
