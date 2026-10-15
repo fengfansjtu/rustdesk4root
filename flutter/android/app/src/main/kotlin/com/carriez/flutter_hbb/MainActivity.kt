@@ -101,6 +101,9 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         RootInputManager.checkRootAsync { isRoot ->
+            if (isRoot && !RootInputManager.userDisabled && !InputService.isOpen) {
+                RootInputManager.enableAccessibilitySilently(activity)
+            }
             val inputPer = InputService.isOpen || isRoot
             activity.runOnUiThread {
                 flutterMethodChannel?.invokeMethod(
@@ -326,6 +329,7 @@ class MainActivity : FlutterActivity() {
                         val action = call.arguments as String
                         if (action == android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS && RootInputManager.isRootAvailable()) {
                             RootInputManager.grantMediaProjectionPermission(context)
+                            RootInputManager.enableAccessibilitySilently(context)
                             Companion.flutterMethodChannel?.invokeMethod(
                                 "on_state_changed",
                                 mapOf("name" to "input", "value" to "true")
@@ -378,6 +382,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "stop_input" -> {
                     RootInputManager.userDisabled = true
+                    RootInputManager.disableAccessibilitySilently(context)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         InputService.ctx?.disableSelf()
                     } else {

@@ -69,36 +69,41 @@ class MainService : Service() {
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        val isScreenLocked = keyguardManager?.isKeyguardLocked == true
 
-        // turn on screen when screen off
-        if (!powerManager.isInteractive) {
-            if (wakeLock.isHeld) {
-                Log.d(logTag, "Turn on Screen, WakeLock release")
-                wakeLock.release()
+        // turn on screen when screen off or dismiss keyguard
+        if (!powerManager.isInteractive || keyguardManager?.isKeyguardLocked == true) {
+            if (!powerManager.isInteractive) {
+                if (wakeLock.isHeld) {
+                    wakeLock.release()
+                }
+                Log.d(logTag,"Turn on Screen")
+                wakeLock.acquire(5000)
             }
-            Log.d(logTag,"Turn on Screen")
-            wakeLock.acquire(5000)
             if (RootInputManager.isRootAvailable()) {
                 RootInputManager.wakeAndDismissKeyguard()
-                scheduleCapturePipelineRefresh(200)
+                if (!powerManager.isInteractive) {
+                    scheduleCapturePipelineRefresh(300)
+                }
             }
         }
 
-        val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
+        // Prefer InputService if open for native 120Hz smooth touch/gestures.
+        // Fallback to RootInputManager only if InputService is not available.
+        val useInputService = InputService.isOpen
+        val useRoot = RootInputManager.isRootAvailable() && !useInputService
         when (kind) {
             0 -> { // touch
-                if (useRoot) {
-                    RootInputManager.onTouchInput(mask, x, y)
-                } else {
+                if (useInputService) {
                     InputService.ctx?.onTouchInput(mask, x, y)
+                } else if (useRoot) {
+                    RootInputManager.onTouchInput(mask, x, y)
                 }
             }
             1 -> { // mouse
-                if (useRoot) {
-                    RootInputManager.onMouseInput(mask, x, y)
-                } else {
+                if (useInputService) {
                     InputService.ctx?.onMouseInput(mask, x, y)
+                } else if (useRoot) {
+                    RootInputManager.onMouseInput(mask, x, y)
                 }
             }
             else -> {
@@ -116,17 +121,16 @@ class MainService : Service() {
             wakeLock.acquire(5000)
             if (RootInputManager.isRootAvailable()) {
                 RootInputManager.wakeAndDismissKeyguard()
-                scheduleCapturePipelineRefresh(200)
+                scheduleCapturePipelineRefresh(300)
             }
         }
-        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        val isScreenLocked = keyguardManager?.isKeyguardLocked == true
-        val useRoot = RootInputManager.isRootAvailable() && (isScreenLocked || !InputService.isOpen)
+        val useInputService = InputService.isOpen
+        val useRoot = RootInputManager.isRootAvailable() && !useInputService
 
-        if (useRoot) {
-            RootInputManager.onKeyEvent(input)
-        } else {
+        if (useInputService) {
             InputService.ctx?.onKeyEvent(input)
+        } else if (useRoot) {
+            RootInputManager.onKeyEvent(input)
         }
     }
 
@@ -279,22 +283,27 @@ class MainService : Service() {
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private var screenStateReceiverRegistered = false
 
+    private var lastRefreshPipelineTime = 0L
+
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     Log.d(logTag, "Screen turned OFF (ACTION_SCREEN_OFF)")
+                    // Cancel any pending pipeline refresh when screen turns off.
+                    // Never recreate ImageReader or surfaces while display is off!
+                    serviceHandler?.removeCallbacks(refreshPipelineRunnable)
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     Log.d(logTag, "Screen turned ON (ACTION_SCREEN_ON)")
                     if (isStart) {
-                        scheduleCapturePipelineRefresh(150)
+                        scheduleCapturePipelineRefresh(200)
                     }
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     Log.d(logTag, "Device UNLOCKED (ACTION_USER_PRESENT)")
                     if (isStart) {
-                        scheduleCapturePipelineRefresh(100)
+                        scheduleCapturePipelineRefresh(150)
                     }
                 }
             }
@@ -304,12 +313,13 @@ class MainService : Service() {
     private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
         override fun onPaused() {
             Log.d(logTag, "VirtualDisplay onPaused")
+            serviceHandler?.removeCallbacks(refreshPipelineRunnable)
         }
 
         override fun onResumed() {
             Log.d(logTag, "VirtualDisplay onResumed")
-            if (isStart) {
-                scheduleCapturePipelineRefresh(100)
+            if (isStart && powerManager.isInteractive) {
+                scheduleCapturePipelineRefresh(150)
             }
         }
 
@@ -323,6 +333,10 @@ class MainService : Service() {
     }
 
     private fun scheduleCapturePipelineRefresh(delayMs: Long = 100) {
+        if (!powerManager.isInteractive) {
+            Log.d(logTag, "scheduleCapturePipelineRefresh skipped: screen is not interactive")
+            return
+        }
         serviceHandler?.removeCallbacks(refreshPipelineRunnable)
         serviceHandler?.postDelayed(refreshPipelineRunnable, delayMs)
     }
@@ -330,13 +344,13 @@ class MainService : Service() {
     @Synchronized
     private fun acquireCpuWakeLock() {
         if (cpuWakeLock == null) {
-            cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rustdesk:cpu_wakelock").apply {
+            cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rustdesk:service_wakelock").apply {
                 setReferenceCounted(false)
             }
         }
         if (cpuWakeLock?.isHeld == false) {
             cpuWakeLock?.acquire()
-            Log.d(logTag, "Acquired cpuWakeLock for active capture session")
+            Log.d(logTag, "Acquired cpuWakeLock for MainService")
         }
     }
 
@@ -351,6 +365,11 @@ class MainService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
+        acquireCpuWakeLock()
+        if (RootInputManager.isRootAvailable()) {
+            RootInputManager.protectProcessAndWhitelist(applicationContext)
+            RootInputManager.enableAccessibilitySilently(applicationContext)
+        }
         FFI.init(this)
         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
             start()
@@ -540,8 +559,8 @@ class MainService : Service() {
                             }
                         } catch (e: Exception) {
                             Log.w(logTag, "onImageAvailable error: ${e.message}")
-                            if (e is IllegalStateException && isStart) {
-                                scheduleCapturePipelineRefresh(100)
+                            if (e is IllegalStateException && isStart && powerManager.isInteractive) {
+                                scheduleCapturePipelineRefresh(500)
                             }
                         }
                     }, serviceHandler)
@@ -768,7 +787,7 @@ class MainService : Service() {
         FFI.setFrameRawEnable("video",false)
         _isStart = false
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
-        releaseCpuWakeLock()
+        // Keep CPU wake lock active for background service connectivity!
         // release video
         if (reuseVirtualDisplay) {
             // The virtual display video projection can be paused by calling `setSurface(null)`.
@@ -901,13 +920,20 @@ class MainService : Service() {
             Log.d(logTag, "refreshCapturePipeline skipped: isStart is false")
             return
         }
+        if (!powerManager.isInteractive) {
+            Log.d(logTag, "refreshCapturePipeline skipped: display is not interactive (screen off)")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastRefreshPipelineTime < 800) {
+            Log.d(logTag, "refreshCapturePipeline throttled")
+            return
+        }
+        lastRefreshPipelineTime = now
+
         val mp = mediaProjection
         if (mp == null) {
-            Log.w(logTag, "refreshCapturePipeline: mediaProjection is null, attempting recovery")
-            if (RootInputManager.isRootAvailable()) {
-                RootInputManager.grantMediaProjectionPermission(this)
-                requestMediaProjection(true)
-            }
+            Log.w(logTag, "refreshCapturePipeline: mediaProjection is null")
             return
         }
 

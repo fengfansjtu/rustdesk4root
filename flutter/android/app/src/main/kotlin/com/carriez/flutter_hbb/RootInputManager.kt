@@ -77,9 +77,73 @@ object RootInputManager {
             if (available) {
                 grantMediaProjectionPermission(context)
                 wakeAndDismissKeyguard()
+                enableAccessibilitySilently(context)
+                protectProcessAndWhitelist(context)
             }
             callback(available)
         }
+    }
+
+    /**
+     * Silently enable AccessibilityService via secure settings using root privileges.
+     * This provides smooth 120Hz native gesture injection without opening settings dialogs.
+     */
+    fun enableAccessibilitySilently(context: Context) {
+        val pkg = context.packageName
+        val serviceName = "$pkg/${InputService::class.java.canonicalName}"
+        val cmd = """
+            appops set $pkg ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+            appops set $pkg BIND_ACCESSIBILITY_SERVICE allow 2>/dev/null || true
+            current=$(settings get secure enabled_accessibility_services)
+            if [ "$current" = "null" ] || [ -z "$current" ]; then
+                settings put secure enabled_accessibility_services "$serviceName"
+            else
+                case ":$current:" in
+                    *":$serviceName:"*) ;;
+                    *) settings put secure enabled_accessibility_services "$current:$serviceName" ;;
+                esac
+            fi
+            settings put secure accessibility_enabled 1
+        """.trimIndent()
+        execRootCmd(cmd)
+        Log.i(TAG, "Sent silent accessibility enable command for $serviceName")
+    }
+
+    /**
+     * Silently disable AccessibilityService via secure settings when user stops input.
+     */
+    fun disableAccessibilitySilently(context: Context) {
+        val pkg = context.packageName
+        val serviceName = "$pkg/${InputService::class.java.canonicalName}"
+        val cmd = """
+            current=$(settings get secure enabled_accessibility_services)
+            if [ "$current" != "null" ] && [ -n "$current" ]; then
+                new_services=$(echo "$current" | tr ':' '\n' | grep -v "$serviceName" | tr '\n' ':' | sed 's/:$//')
+                settings put secure enabled_accessibility_services "$new_services"
+            fi
+        """.trimIndent()
+        execRootCmd(cmd)
+        Log.i(TAG, "Sent silent accessibility disable command for $serviceName")
+    }
+
+    /**
+     * Prevent system battery saver / OEM killers from terminating RustDesk when screen locks.
+     */
+    fun protectProcessAndWhitelist(context: Context) {
+        val pkg = context.packageName
+        val myPid = android.os.Process.myPid()
+        val cmd = """
+            dumpsys deviceidle whitelist +$pkg 2>/dev/null || true
+            cmd appops set $pkg RUN_IN_BACKGROUND allow 2>/dev/null || true
+            cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
+            cmd appops set $pkg AUTO_START allow 2>/dev/null || true
+            cmd appops set $pkg BOOT_COMPLETED allow 2>/dev/null || true
+            cmd appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
+            cmd appops set $pkg START_FOREGROUND allow 2>/dev/null || true
+            echo -900 > /proc/$myPid/oom_score_adj 2>/dev/null || true
+        """.trimIndent()
+        execRootCmd(cmd)
+        Log.i(TAG, "Applied battery whitelist and OOM protection for $pkg (pid $myPid)")
     }
 
     private fun checkSu(): Boolean {
