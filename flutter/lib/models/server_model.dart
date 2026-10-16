@@ -58,6 +58,36 @@ class ServerModel with ChangeNotifier {
 
   bool get inputOk => _inputOk;
 
+  String _inputControlMode = kInputControlModeAccessibility;
+  String get inputControlMode => _inputControlMode;
+
+  Future<void> initInputControlMode() async {
+    final saved = bind.mainGetLocalOption(key: kOptionInputControlMode);
+    _inputControlMode = saved.isNotEmpty ? saved : kInputControlModeAccessibility;
+    if (isAndroid) {
+      try {
+        await parent.target?.invokeMethod("set_input_mode", _inputControlMode);
+      } catch (e) {
+        debugPrint("set_input_mode error: $e");
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<void> setInputControlMode(String mode) async {
+    _inputControlMode = mode;
+    await bind.mainSetLocalOption(key: kOptionInputControlMode, value: mode);
+    if (isAndroid) {
+      try {
+        await parent.target?.invokeMethod("set_input_mode", mode);
+        parent.target?.invokeMethod("check_service");
+      } catch (e) {
+        debugPrint("set_input_mode error: $e");
+      }
+    }
+    notifyListeners();
+  }
+
   bool get audioOk => _audioOk;
 
   bool get fileOk => _fileOk;
@@ -219,6 +249,8 @@ class ServerModel with ChangeNotifier {
     final clipOption = await bind.mainGetOption(key: kOptionEnableClipboard);
     _clipboardOk = clipOption != 'N';
 
+    await initInputControlMode();
+
     notifyListeners();
   }
 
@@ -340,19 +372,21 @@ class ServerModel with ChangeNotifier {
       notifyListeners();
     } else {
       if (parent.target != null) {
-        try {
-          final res = await parent.target?.invokeMethod("request_root_input");
-          if (res == true) {
-            _inputOk = true;
-            bind.mainSetOption(
-                key: kOptionEnableKeyboard, value: defaultOptionYes);
-            notifyListeners();
-            return;
+        if (_inputControlMode == kInputControlModeRoot) {
+          try {
+            final res = await parent.target?.invokeMethod("request_root_input");
+            if (res == true) {
+              _inputOk = true;
+              bind.mainSetOption(
+                  key: kOptionEnableKeyboard, value: defaultOptionYes);
+              notifyListeners();
+              return;
+            }
+          } catch (e) {
+            debugPrint("request_root_input error: $e");
           }
-        } catch (e) {
-          debugPrint("request_root_input error: $e");
         }
-        /// fallback to accessibility dialog only if root is unavailable
+        /// For original accessibility mode (or root fallback), open accessibility settings
         showInputWarnAlert(parent.target!);
       }
     }

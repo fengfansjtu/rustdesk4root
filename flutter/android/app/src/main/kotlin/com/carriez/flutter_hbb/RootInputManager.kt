@@ -2,6 +2,7 @@ package com.carriez.flutter_hbb
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
 import hbb.KeyEventConverter
@@ -21,6 +22,9 @@ import kotlin.math.max
 object RootInputManager {
     private const val TAG = "RootInputManager"
 
+    const val MODE_ACCESSIBILITY = "accessibility"
+    const val MODE_ROOT = "root"
+
     private var suProcess: Process? = null
     private var suWriter: BufferedWriter? = null
     private val executor = Executors.newSingleThreadExecutor()
@@ -38,6 +42,17 @@ object RootInputManager {
     private var curY = 0
     private var downTime = 0L
     private var isDown = false
+
+    fun getInputControlMode(context: Context): String {
+        val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
+        return prefs.getString("input_control_mode", MODE_ACCESSIBILITY) ?: MODE_ACCESSIBILITY
+    }
+
+    fun setInputControlMode(context: Context, mode: String) {
+        val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
+        prefs.edit().putString("input_control_mode", mode).apply()
+        Log.i(TAG, "Input control mode set to: $mode")
+    }
 
     /**
      * Check if root (su) access is available on this device.
@@ -77,7 +92,6 @@ object RootInputManager {
             if (available) {
                 grantMediaProjectionPermission(context)
                 wakeAndDismissKeyguard()
-                enableAccessibilitySilently(context)
                 protectProcessAndWhitelist(context)
             }
             callback(available)
@@ -162,6 +176,20 @@ object RootInputManager {
     private fun checkSu(): Boolean {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            Thread {
+                try {
+                    process.inputStream.bufferedReader().use { r ->
+                        while (r.readLine() != null) {}
+                    }
+                } catch (ignored: Exception) {}
+            }.apply { isDaemon = true; start() }
+            Thread {
+                try {
+                    process.errorStream.bufferedReader().use { r ->
+                        while (r.readLine() != null) {}
+                    }
+                } catch (ignored: Exception) {}
+            }.apply { isDaemon = true; start() }
             val exitCode = process.waitFor()
             Log.i(TAG, "checkSu exit code: $exitCode")
             exitCode == 0
@@ -178,8 +206,25 @@ object RootInputManager {
         }
         try {
             val p = Runtime.getRuntime().exec("su")
+            Thread {
+                try {
+                    p.inputStream.bufferedReader().use { r ->
+                        while (r.readLine() != null) {}
+                    }
+                } catch (ignored: Exception) {}
+            }.apply { isDaemon = true; start() }
+            Thread {
+                try {
+                    p.errorStream.bufferedReader().use { r ->
+                        while (r.readLine() != null) {}
+                    }
+                } catch (ignored: Exception) {}
+            }.apply { isDaemon = true; start() }
+            val writer = BufferedWriter(OutputStreamWriter(p.outputStream))
+            writer.write("exec 1>/dev/null 2>&1\n")
+            writer.flush()
             suProcess = p
-            suWriter = BufferedWriter(OutputStreamWriter(p.outputStream))
+            suWriter = writer
             Log.i(TAG, "Persistent su shell process initiated successfully.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start persistent su shell", e)
@@ -201,7 +246,17 @@ object RootInputManager {
                     writer.write("\n")
                     writer.flush()
                 } else {
-                    Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                    val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                    Thread {
+                        try {
+                            p.inputStream.bufferedReader().use { r -> while (r.readLine() != null) {} }
+                        } catch (ignored: Exception) {}
+                    }.apply { isDaemon = true; start() }
+                    Thread {
+                        try {
+                            p.errorStream.bufferedReader().use { r -> while (r.readLine() != null) {} }
+                        } catch (ignored: Exception) {}
+                    }.apply { isDaemon = true; start() }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error executing root command: $cmd", e)
@@ -252,16 +307,16 @@ object RootInputManager {
                 downY = y
                 curX = x
                 curY = y
-                downTime = System.currentTimeMillis()
+                downTime = SystemClock.uptimeMillis()
                 isDown = true
             }
             LEFT_UP -> {
                 if (isDown) {
                     isDown = false
-                    val duration = max(50L, System.currentTimeMillis() - downTime)
+                    val duration = max(50L, SystemClock.uptimeMillis() - downTime)
                     val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                    if (dist < 30) {
-                        if (duration < 500L) {
+                    if (dist < 25) {
+                        if (duration < 400L) {
                             execRootCmd("input tap $downX $downY")
                         } else {
                             execRootCmd("input swipe $downX $downY $downX $downY $duration")
@@ -282,12 +337,12 @@ object RootInputManager {
             }
             WHEEL_DOWN -> {
                 // Scroll down (finger swipe up)
-                val targetY = max(0, y - 300)
+                val targetY = max(0, y - 350)
                 execRootCmd("input swipe $x $y $x $targetY 150")
             }
             WHEEL_UP -> {
                 // Scroll up (finger swipe down)
-                val targetY = y + 300
+                val targetY = y + 350
                 execRootCmd("input swipe $x $y $x $targetY 150")
             }
         }
@@ -306,7 +361,7 @@ object RootInputManager {
                 downY = y
                 curX = x
                 curY = y
-                downTime = System.currentTimeMillis()
+                downTime = SystemClock.uptimeMillis()
                 isDown = true
             }
             TOUCH_PAN_UPDATE -> {
@@ -318,16 +373,18 @@ object RootInputManager {
             TOUCH_PAN_END -> {
                 if (isDown) {
                     isDown = false
-                    val duration = max(50L, System.currentTimeMillis() - downTime)
-                    val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                    if (dist < 30) {
-                        if (duration < 500L) {
+                    val duration = max(50L, SystemClock.uptimeMillis() - downTime)
+                    val endX = if (_x > 0 || _y > 0) (_x * SCREEN_INFO.scale) else curX
+                    val endY = if (_x > 0 || _y > 0) (_y * SCREEN_INFO.scale) else curY
+                    val dist = hypot((endX - downX).toDouble(), (endY - downY).toDouble())
+                    if (dist < 25) {
+                        if (duration < 400L) {
                             execRootCmd("input tap $downX $downY")
                         } else {
                             execRootCmd("input swipe $downX $downY $downX $downY $duration")
                         }
                     } else {
-                        execRootCmd("input swipe $downX $downY $curX $curY $duration")
+                        execRootCmd("input swipe $downX $downY $endX $endY $duration")
                     }
                 }
             }

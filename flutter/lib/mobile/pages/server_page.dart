@@ -614,6 +614,46 @@ class _PermissionCheckerState extends State<PermissionChecker> {
             serverModel.inputOk,
             serverModel.toggleInput,
           ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4.0, right: 4.0, bottom: 6.0),
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 6.0,
+              runSpacing: 4.0,
+              children: [
+                Text(
+                  "${translate("Input Control Mode")}:",
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                ChoiceChip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(
+                    translate("Accessibility Service (Original)"),
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  selected: serverModel.inputControlMode == kInputControlModeAccessibility,
+                  onSelected: (selected) {
+                    if (selected) {
+                      serverModel.setInputControlMode(kInputControlModeAccessibility);
+                    }
+                  },
+                ),
+                ChoiceChip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(
+                    translate("Root Permission Mode"),
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  selected: serverModel.inputControlMode == kInputControlModeRoot,
+                  onSelected: (selected) {
+                    if (selected) {
+                      serverModel.setInputControlMode(kInputControlModeRoot);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
           PermissionRow(
             translate("Transfer file"),
             serverModel.fileOk,

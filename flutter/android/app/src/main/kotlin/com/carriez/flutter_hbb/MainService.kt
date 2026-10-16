@@ -83,26 +83,16 @@ class MainService : Service() {
             }
         }
 
-        // Prefer InputService if open for native 120Hz smooth touch/gestures.
-        // Fallback to RootInputManager only if InputService is not available.
-        val useInputService = InputService.isOpen
-        val useRoot = RootInputManager.isRootAvailable() && !useInputService
-        when (kind) {
-            0 -> { // touch
-                if (useInputService) {
-                    InputService.ctx?.onTouchInput(mask, x, y)
-                } else if (useRoot) {
-                    RootInputManager.onTouchInput(mask, x, y)
-                }
+        val mode = RootInputManager.getInputControlMode(this)
+        if (mode == RootInputManager.MODE_ROOT) {
+            when (kind) {
+                0 -> RootInputManager.onTouchInput(mask, x, y)
+                1 -> RootInputManager.onMouseInput(mask, x, y)
             }
-            1 -> { // mouse
-                if (useInputService) {
-                    InputService.ctx?.onMouseInput(mask, x, y)
-                } else if (useRoot) {
-                    RootInputManager.onMouseInput(mask, x, y)
-                }
-            }
-            else -> {
+        } else {
+            when (kind) {
+                0 -> InputService.ctx?.onTouchInput(mask, x, y)
+                1 -> InputService.ctx?.onMouseInput(mask, x, y)
             }
         }
     }
@@ -120,13 +110,11 @@ class MainService : Service() {
                 }
             }
         }
-        val useInputService = InputService.isOpen
-        val useRoot = RootInputManager.isRootAvailable() && !useInputService
-
-        if (useInputService) {
-            InputService.ctx?.onKeyEvent(input)
-        } else if (useRoot) {
+        val mode = RootInputManager.getInputControlMode(this)
+        if (mode == RootInputManager.MODE_ROOT) {
             RootInputManager.onKeyEvent(input)
+        } else {
+            InputService.ctx?.onKeyEvent(input)
         }
     }
 
@@ -387,7 +375,8 @@ class MainService : Service() {
         RootInputManager.checkRootAsync { isRoot ->
             if (isRoot) {
                 RootInputManager.protectProcessAndWhitelist(applicationContext)
-                if (!RootInputManager.userDisabled && !InputService.isOpen) {
+                val mode = RootInputManager.getInputControlMode(applicationContext)
+                if (mode == RootInputManager.MODE_ACCESSIBILITY && !RootInputManager.userDisabled && !InputService.isOpen) {
                     RootInputManager.enableAccessibilitySilently(applicationContext)
                 }
             }
@@ -883,7 +872,11 @@ class MainService : Service() {
                 mapOf("name" to "media", "value" to isReady.toString())
             )
         }
-        val isInputReady = InputService.isOpen || RootInputManager.isRootAvailable()
+        val isInputReady = if (RootInputManager.getInputControlMode(this) == RootInputManager.MODE_ROOT) {
+            RootInputManager.isRootAvailable()
+        } else {
+            InputService.isOpen
+        }
         Handler(Looper.getMainLooper()).post {
             MainActivity.flutterMethodChannel?.invokeMethod(
                 "on_state_changed",

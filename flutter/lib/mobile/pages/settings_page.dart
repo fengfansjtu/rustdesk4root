@@ -714,6 +714,21 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             },
     ));
 
+    enhancementsTiles.add(_getPopupDialogRadioEntry(
+      title: 'Input Control Mode',
+      list: [
+        _RadioEntry('Accessibility Service (Original)', kInputControlModeAccessibility),
+        _RadioEntry('Root Permission Mode', kInputControlModeRoot),
+      ],
+      getter: () => bind.mainGetLocalOption(key: kOptionInputControlMode).isEmpty
+          ? kInputControlModeAccessibility
+          : bind.mainGetLocalOption(key: kOptionInputControlMode),
+      asyncSetter: (value) async {
+        await gFFI.serverModel.setInputControlMode(value);
+        setState(() {});
+      },
+    ));
+
     final disabledSettings = bind.isDisableSettings();
     final hideSecuritySettings =
         bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) == 'Y';

@@ -330,18 +330,8 @@ class MainActivity : FlutterActivity() {
                 START_ACTION -> {
                     if (call.arguments is String) {
                         val action = call.arguments as String
-                        if (action == android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS && RootInputManager.isRootAvailable()) {
-                            RootInputManager.grantMediaProjectionPermission(context)
-                            RootInputManager.enableAccessibilitySilently(context)
-                            Companion.flutterMethodChannel?.invokeMethod(
-                                "on_state_changed",
-                                mapOf("name" to "input", "value" to "true")
-                            )
-                            result.success(true)
-                        } else {
-                            startAction(context, action)
-                            result.success(true)
-                        }
+                        startAction(context, action)
+                        result.success(true)
                     } else {
                         result.success(false)
                     }
@@ -352,6 +342,30 @@ class MainActivity : FlutterActivity() {
                     } ?: let {
                         result.success(false)
                     }
+                }
+                "set_input_mode" -> {
+                    val mode = call.arguments as? String ?: RootInputManager.MODE_ACCESSIBILITY
+                    RootInputManager.setInputControlMode(context, mode)
+                    if (mode == RootInputManager.MODE_ROOT) {
+                        RootInputManager.userDisabled = false
+                        RootInputManager.checkRootAsync { isRoot ->
+                            runOnUiThread {
+                                Companion.flutterMethodChannel?.invokeMethod(
+                                    "on_state_changed",
+                                    mapOf("name" to "input", "value" to isRoot.toString())
+                                )
+                            }
+                        }
+                    } else {
+                        Companion.flutterMethodChannel?.invokeMethod(
+                            "on_state_changed",
+                            mapOf("name" to "input", "value" to InputService.isOpen.toString())
+                        )
+                    }
+                    result.success(true)
+                }
+                "get_input_mode" -> {
+                    result.success(RootInputManager.getInputControlMode(context))
                 }
                 "request_root_input" -> {
                     RootInputManager.userDisabled = false
@@ -368,14 +382,23 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "check_service" -> {
-                    RootInputManager.checkRootAsync { isRoot ->
-                        val inputPer = InputService.isOpen || (isRoot && !RootInputManager.userDisabled)
-                        runOnUiThread {
-                            Companion.flutterMethodChannel?.invokeMethod(
-                                "on_state_changed",
-                                mapOf("name" to "input", "value" to inputPer.toString())
-                            )
+                    val mode = RootInputManager.getInputControlMode(context)
+                    if (mode == RootInputManager.MODE_ROOT) {
+                        RootInputManager.checkRootAsync { isRoot ->
+                            val inputPer = isRoot && !RootInputManager.userDisabled
+                            runOnUiThread {
+                                Companion.flutterMethodChannel?.invokeMethod(
+                                    "on_state_changed",
+                                    mapOf("name" to "input", "value" to inputPer.toString())
+                                )
+                            }
                         }
+                    } else {
+                        val inputPer = InputService.isOpen
+                        Companion.flutterMethodChannel?.invokeMethod(
+                            "on_state_changed",
+                            mapOf("name" to "input", "value" to inputPer.toString())
+                        )
                     }
                     Companion.flutterMethodChannel?.invokeMethod(
                         "on_state_changed",
@@ -384,12 +407,15 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "stop_input" -> {
-                    RootInputManager.userDisabled = true
-                    RootInputManager.disableAccessibilitySilently(context)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        InputService.ctx?.disableSelf()
+                    val mode = RootInputManager.getInputControlMode(context)
+                    if (mode == RootInputManager.MODE_ROOT) {
+                        RootInputManager.userDisabled = true
                     } else {
-                        InputService.ctx = null
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            InputService.ctx?.disableSelf()
+                        } else {
+                            InputService.ctx = null
+                        }
                     }
                     Companion.flutterMethodChannel?.invokeMethod(
                         "on_state_changed",
