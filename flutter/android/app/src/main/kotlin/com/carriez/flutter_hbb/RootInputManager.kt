@@ -1,8 +1,6 @@
 package com.carriez.flutter_hbb
 
 import android.content.Context
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -15,13 +13,13 @@ import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.concurrent.Executors
-import kotlin.math.hypot
+import java.util.concurrent.LinkedBlockingQueue
 import kotlin.math.max
 
 /**
  * Root-based Input and System Manager.
  * Features a persistent Scrcpy-style RootInputServer running via app_process (UID 0)
- * for sub-millisecond, low-latency touch and key injection into Android's InputManager.
+ * connected via high-speed anonymous pipe (<0.1ms latency) with queue buffering.
  */
 object RootInputManager {
     private const val TAG = "RootInputManager"
@@ -29,20 +27,19 @@ object RootInputManager {
     const val MODE_ACCESSIBILITY = "accessibility"
     const val MODE_ROOT = "root"
 
-    private var suProcess: Process? = null
-    private var suWriter: BufferedWriter? = null
+    // InputService mask constants
+    private const val LEFT_MOVE = 8
+    private const val LEFT_DOWN = 9
+    private const val LEFT_UP = 10
+    private const val RIGHT_UP = 18
+    private const val WHEEL_BUTTON_UP = 34
+    private const val BACK_UP = 66
+    private const val WHEEL_DOWN = 523331
+    private const val WHEEL_UP = 963
 
-    // Scrcpy-style daemon server
-    private var serverProcess: Process? = null
-    private var serverWriter: BufferedWriter? = null
-    private var localSocket: LocalSocket? = null
-    private var localSocketWriter: BufferedWriter? = null
-    @Volatile
-    private var isServerReady = false
-    @Volatile
-    private var isStartingServer = false
-
-    private val executor = Executors.newSingleThreadExecutor()
+    private const val TOUCH_PAN_START = 4
+    private const val TOUCH_PAN_UPDATE = 5
+    private const val TOUCH_PAN_END = 6
 
     @Volatile
     private var rootAvailable: Boolean? = null
@@ -50,13 +47,27 @@ object RootInputManager {
     @Volatile
     var userDisabled: Boolean = false
 
-    // Touch and mouse tracking state
-    private var downX = 0
-    private var downY = 0
+    // App_process daemon management
+    @Volatile
+    private var isWorkerRunning = false
+    @Volatile
+    private var isServerReady = false
+    private var serverProcess: Process? = null
+    private var serverWriter: BufferedWriter? = null
+
+    // Command queue prevents dropping the initial ACTION_DOWN while server starts up
+    private val cmdQueue = LinkedBlockingQueue<String>(500)
+
+    // Shell management for system root commands
+    private var suProcess: Process? = null
+    private var suWriter: BufferedWriter? = null
+    private val executor = Executors.newSingleThreadExecutor()
+
+    // Tracking state
     private var curX = 0
     private var curY = 0
-    private var downTime = 0L
-    private var isDown = false
+    private var leftButtonDown = false
+    private var isPanDown = false
 
     fun getInputControlMode(context: Context): String {
         val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
@@ -122,273 +133,277 @@ object RootInputManager {
      */
     @Synchronized
     fun startServer(context: Context) {
-        if (isServerReady && serverWriter != null) return
-        if (isStartingServer) return
-        isStartingServer = true
+        if (isWorkerRunning) return
+        isWorkerRunning = true
 
-        Thread {
-            var p: Process? = null
-            var writer: BufferedWriter? = null
-            var reader: BufferedReader? = null
-            try {
-                val apkPath = context.packageCodePath
-                Log.i(TAG, "Launching RootInputServer from $apkPath ...")
-                p = Runtime.getRuntime().exec("su")
-                writer = BufferedWriter(OutputStreamWriter(p.outputStream))
-                reader = BufferedReader(InputStreamReader(p.inputStream))
-
-                val errReader = p.errorStream.bufferedReader()
-                Thread {
-                    try {
-                        var line: String?
-                        while (errReader.readLine().also { line = it } != null) {
-                            Log.d(TAG, "RootInputServer ERR: $line")
-                        }
-                    } catch (ignored: Throwable) {}
-                }.apply { isDaemon = true; start() }
-
-                writer.write("export CLASSPATH=$apkPath\n")
-                writer.write("exec app_process / com.carriez.flutter_hbb.RootInputServer\n")
-                writer.flush()
-
-                var line: String? = null
-                val readThread = Thread {
-                    try {
-                        line = reader.readLine()
-                    } catch (ignored: Throwable) {}
-                }
-                readThread.start()
-                readThread.join(3000)
-
-                Log.i(TAG, "RootInputServer response: $line")
-                if (line == "READY") {
-                    serverProcess = p
-                    serverWriter = writer
-                    isServerReady = true
-                    Log.i(TAG, "RootInputServer connected and ready for low-latency injection.")
-                    // Continuously drain stdout to prevent pipe buffer from filling up
-                    val outReader = reader
-                    Thread {
-                        try {
-                            var l: String?
-                            while (outReader.readLine().also { l = it } != null) {
-                                Log.d(TAG, "RootInputServer OUT: $l")
-                            }
-                        } catch (ignored: Throwable) {}
-                    }.apply { isDaemon = true; start() }
-                } else {
-                    Log.w(TAG, "RootInputServer unexpected response: $line, will fallback to su shell")
+        Thread({
+            while (isWorkerRunning) {
+                try {
+                    launchServerProcess(context)
+                    // Consume touch & key commands from queue and stream to app_process stdin pipe (<0.1ms latency)
+                    while (isWorkerRunning && isServerReady && serverWriter != null) {
+                        val cmd = cmdQueue.take()
+                        serverWriter?.write(cmd)
+                        serverWriter?.newLine()
+                        serverWriter?.flush()
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "RootInputServer disconnected, restarting in 1s...", e)
                     isServerReady = false
-                    try { writer.close() } catch (ignored: Throwable) {}
-                    try { p.destroy() } catch (ignored: Throwable) {}
+                    try { serverWriter?.close() } catch (ignored: Throwable) {}
+                    try { serverProcess?.destroy() } catch (ignored: Throwable) {}
+                    serverWriter = null
+                    serverProcess = null
+                    try { Thread.sleep(1000) } catch (ignored: Throwable) {}
                 }
-            } catch (e: Throwable) {
-                Log.e(TAG, "Failed to start RootInputServer", e)
-                isServerReady = false
-                try { writer?.close() } catch (ignored: Throwable) {}
-                try { p?.destroy() } catch (ignored: Throwable) {}
-            } finally {
-                isStartingServer = false
             }
-        }.apply { isDaemon = true; start() }
+        }, "RootInputWorker").apply { isDaemon = true; start() }
     }
 
-    private var lastSocketConnectAttempt = 0L
+    private fun launchServerProcess(context: Context) {
+        val apkPath = context.packageCodePath
+        val className = "com.carriez.flutter_hbb.RootInputServer"
+        Log.i(TAG, "Launching RootInputServer from $apkPath ...")
 
-    @Synchronized
-    private fun getSocketWriter(): BufferedWriter? {
-        if (localSocketWriter != null && localSocket?.isConnected == true) {
-            return localSocketWriter
+        val proc = ProcessBuilder("su").redirectErrorStream(false).start()
+        serverProcess = proc
+
+        val out = BufferedWriter(OutputStreamWriter(proc.outputStream))
+        val inp = BufferedReader(InputStreamReader(proc.inputStream))
+        val err = BufferedReader(InputStreamReader(proc.errorStream))
+
+        Thread({
+            var errLine: String?
+            try {
+                while (err.readLine().also { errLine = it } != null) {
+                    Log.e(TAG, "[Server-ERR] $errLine")
+                }
+            } catch (ignored: Throwable) {}
+        }, "RootInputErrReader").apply { isDaemon = true; start() }
+
+        out.write("export CLASSPATH=\"$apkPath\"; exec app_process /system/bin $className\n")
+        out.flush()
+
+        var line: String? = null
+        val timeout = SystemClock.uptimeMillis() + 4000L
+        while (SystemClock.uptimeMillis() < timeout) {
+            if (inp.ready()) {
+                line = inp.readLine()
+                Log.d(TAG, "[Server-OUT] $line")
+                if (line != null && line.contains("RUSTDESK_ROOT_SERVER_READY")) {
+                    serverWriter = out
+                    isServerReady = true
+                    Log.i(TAG, "RootInputServer is READY via high-speed anonymous pipe!")
+                    break
+                }
+            } else {
+                SystemClock.sleep(50)
+            }
         }
-        val now = SystemClock.uptimeMillis()
-        if (now - lastSocketConnectAttempt < 1000L) {
-            return null
+
+        if (!isServerReady) {
+            try { out.close() } catch (ignored: Throwable) {}
+            try { proc.destroy() } catch (ignored: Throwable) {}
+            serverWriter = null
+            serverProcess = null
+            throw RuntimeException("RootInputServer failed to report READY: last line='$line'")
         }
-        lastSocketConnectAttempt = now
-        return try {
-            val socket = LocalSocket()
-            localSocket = socket
-            socket.connect(LocalSocketAddress(RootInputServer.SOCKET_NAME))
-            val writer = BufferedWriter(OutputStreamWriter(socket.outputStream))
-            localSocketWriter = writer
-            Log.i(TAG, "Connected to RootInputServer via LocalSocket successfully.")
-            writer
+    }
+
+    private fun enqueueCmd(cmd: String) {
+        if (!cmdQueue.offer(cmd)) {
+            cmdQueue.poll() // Discard oldest command if queue is full to preserve real-time responsiveness
+            cmdQueue.offer(cmd)
+        }
+    }
+
+    private fun getScale(): Int {
+        val s = SCREEN_INFO.scale
+        return if (s > 0) s else 1
+    }
+
+    private fun toPhysicalX(x: Int): Int = max(0, x) * getScale()
+    private fun toPhysicalY(y: Int): Int = max(0, y) * getScale()
+
+    /**
+     * Dispatch mouse input via root without AccessibilityService.
+     * Aligned with InputService.kt mask definitions.
+     */
+    fun onMouseInput(mask: Int, _x: Int, _y: Int) {
+        val x = toPhysicalX(_x)
+        val y = toPhysicalY(_y)
+
+        // mask == 0: hover/move without left button pressed
+        // mask == LEFT_MOVE (8): move while left button is held
+        if (mask == 0 || mask == LEFT_MOVE) {
+            curX = x
+            curY = y
+            // CRITICAL: Only send MOVE when left button is pressed (dragging)!
+            // Moving mouse without left button NEVER injects events, completely eliminating system mouse cursors!
+            if (leftButtonDown) {
+                enqueueCmd("M $curX $curY")
+            }
+            return
+        }
+
+        if (mask == LEFT_DOWN) {
+            curX = x
+            curY = y
+            leftButtonDown = true
+            enqueueCmd("D $curX $curY")
+            return
+        }
+
+        if (mask == LEFT_UP) {
+            curX = x
+            curY = y
+            if (leftButtonDown) {
+                leftButtonDown = false
+                enqueueCmd("U $curX $curY")
+            }
+            return
+        }
+
+        if (mask == RIGHT_UP || mask == BACK_UP) {
+            enqueueCmd("K 4") // KEYCODE_BACK
+            return
+        }
+
+        if (mask == WHEEL_BUTTON_UP) {
+            enqueueCmd("K 3") // KEYCODE_HOME
+            return
+        }
+
+        if (mask == WHEEL_DOWN) {
+            val targetY = max(0, curY - 350)
+            enqueueCmd("S $curX $curY $curX $targetY 100")
+            return
+        }
+
+        if (mask == WHEEL_UP) {
+            val targetY = curY + 350
+            enqueueCmd("S $curX $curY $curX $targetY 100")
+            return
+        }
+    }
+
+    /**
+     * Dispatch touch input via root without AccessibilityService.
+     * Aligned with InputService.kt mask definitions.
+     */
+    fun onTouchInput(mask: Int, _x: Int, _y: Int) {
+        val scale = getScale()
+        when (mask) {
+            TOUCH_PAN_START -> {
+                curX = max(0, _x) * scale
+                curY = max(0, _y) * scale
+                isPanDown = true
+                enqueueCmd("D $curX $curY")
+            }
+            TOUCH_PAN_UPDATE -> {
+                // InputService accumulated delta
+                curX = max(0, curX - _x * scale)
+                curY = max(0, curY - _y * scale)
+                enqueueCmd("M $curX $curY")
+            }
+            TOUCH_PAN_END -> {
+                if (isPanDown) {
+                    isPanDown = false
+                    enqueueCmd("U $curX $curY")
+                }
+                curX = max(0, _x) * scale
+                curY = max(0, _y) * scale
+            }
+        }
+    }
+
+    /**
+     * Dispatch key event via root without AccessibilityService.
+     */
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun onKeyEvent(data: ByteArray) {
+        try {
+            val keyEvent = KeyEvent.parseFrom(data)
+            val keyboardMode = keyEvent.mode
+
+            var textToCommit: String? = null
+            if (keyEvent.hasSeq()) {
+                textToCommit = keyEvent.seq
+            } else if (keyboardMode == KeyboardMode.Legacy) {
+                if (keyEvent.hasChr() && (keyEvent.down || keyEvent.press)) {
+                    val chr = keyEvent.chr
+                    if (chr != null) {
+                        textToCommit = String(Character.toChars(chr))
+                    }
+                }
+            }
+
+            if (!textToCommit.isNullOrEmpty()) {
+                val escaped = textToCommit.replace("'", "'\\''")
+                execRootCmd("input text '$escaped'")
+                return
+            }
+
+            val androidKeyEvent = KeyEventConverter.toAndroidKeyEvent(keyEvent)
+            if (androidKeyEvent != null) {
+                if (keyEvent.down) {
+                    enqueueCmd("KD ${androidKeyEvent.keyCode}")
+                } else {
+                    enqueueCmd("KU ${androidKeyEvent.keyCode}")
+                }
+            }
         } catch (e: Exception) {
-            try { localSocket?.close() } catch (ignored: Exception) {}
-            localSocket = null
-            localSocketWriter = null
-            null
+            Log.e(TAG, "onKeyEvent error: ${e.message}")
         }
     }
 
-    private fun sendServerCommand(cmd: String): Boolean {
-        // 1. Try ultra-fast LocalSocket first (<0.1ms latency)
-        val sockWriter = getSocketWriter()
-        if (sockWriter != null) {
-            try {
-                sockWriter.write(cmd)
-                sockWriter.write("\n")
-                sockWriter.flush()
-                return true
-            } catch (e: Exception) {
-                Log.w(TAG, "LocalSocket write failed, closing socket: ${e.message}")
-                try { localSocketWriter?.close() } catch (ignored: Exception) {}
-                try { localSocket?.close() } catch (ignored: Exception) {}
-                localSocket = null
-                localSocketWriter = null
-            }
-        }
-
-        // 2. Fallback to app_process stdin pipe
-        if (isServerReady && serverWriter != null) {
-            try {
-                serverWriter?.write(cmd)
-                serverWriter?.write("\n")
-                serverWriter?.flush()
-                return true
-            } catch (e: Exception) {
-                Log.w(TAG, "RootInputServer write failed: ${e.message}, falling back")
-                isServerReady = false
-                try {
-                    serverWriter?.close()
-                } catch (ignored: Exception) {}
-                try {
-                    serverProcess?.destroy()
-                } catch (ignored: Exception) {}
-                serverWriter = null
-                serverProcess = null
-            }
-        }
-        return false
+    /**
+     * Wake screen and dismiss lockscreen keyguard if possible.
+     */
+    fun wakeAndDismissKeyguard() {
+        enqueueCmd("W")
+        execRootCmd("input keyevent 224; input keyevent 82; wm dismiss-keyguard")
     }
 
     /**
-     * Silently enable AccessibilityService via secure settings using root privileges.
+     * Check if su binary exists and is executable.
      */
-    fun enableAccessibilitySilently(context: Context) {
-        val pkg = context.packageName
-        val serviceName = "$pkg/${InputService::class.java.canonicalName}"
-        val d = '$'
-        val cmd = """
-            appops set $pkg ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
-            appops set $pkg BIND_ACCESSIBILITY_SERVICE allow 2>/dev/null || true
-            current=${d}(settings get secure enabled_accessibility_services)
-            if [ "${d}current" = "null" ] || [ -z "${d}current" ]; then
-                settings put secure enabled_accessibility_services "$serviceName"
-            else
-                case ":${d}current:" in
-                    *":$serviceName:"*) ;;
-                    *) settings put secure enabled_accessibility_services "${d}current:$serviceName" ;;
-                esac
-            fi
-            settings put secure accessibility_enabled 1
-        """.trimIndent()
-        execRootCmd(cmd)
-        Log.i(TAG, "Sent silent accessibility enable command for $serviceName")
-    }
-
-    /**
-     * Silently disable AccessibilityService via secure settings when user stops input.
-     */
-    fun disableAccessibilitySilently(context: Context) {
-        val pkg = context.packageName
-        val serviceName = "$pkg/${InputService::class.java.canonicalName}"
-        val d = '$'
-        val cmd = """
-            current=${d}(settings get secure enabled_accessibility_services)
-            if [ "${d}current" != "null" ] && [ -n "${d}current" ]; then
-                new_services=${d}(echo "${d}current" | tr ':' '\n' | grep -v "$serviceName" | tr '\n' ':' | sed 's/:${d}//')
-                settings put secure enabled_accessibility_services "${d}new_services"
-            fi
-        """.trimIndent()
-        execRootCmd(cmd)
-        Log.i(TAG, "Sent silent accessibility disable command for $serviceName")
-    }
-
-    /**
-     * Prevent system battery saver / OEM killers from terminating RustDesk when screen locks.
-     */
-    fun protectProcessAndWhitelist(context: Context) {
-        val pkg = context.packageName
-        val myPid = android.os.Process.myPid()
-        val cmd = """
-            dumpsys deviceidle whitelist +$pkg 2>/dev/null || true
-            pm grant $pkg android.permission.CAPTURE_SECURE_VIDEO_OUTPUT 2>/dev/null || true
-            pm grant $pkg android.permission.CAPTURE_VIDEO_OUTPUT 2>/dev/null || true
-            pm grant $pkg android.permission.INTERNAL_SYSTEM_WINDOW 2>/dev/null || true
-            pm grant $pkg android.permission.SYSTEM_ALERT_WINDOW 2>/dev/null || true
-            pm grant $pkg android.permission.READ_FRAME_BUFFER 2>/dev/null || true
-            pm grant $pkg android.permission.WAKE_LOCK 2>/dev/null || true
-            appops set $pkg PROJECT_MEDIA allow 2>/dev/null || true
-            cmd appops set $pkg RUN_IN_BACKGROUND allow 2>/dev/null || true
-            cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
-            cmd appops set $pkg AUTO_START allow 2>/dev/null || true
-            cmd appops set $pkg BOOT_COMPLETED allow 2>/dev/null || true
-            cmd appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
-            cmd appops set $pkg START_FOREGROUND allow 2>/dev/null || true
-            cmd appops set $pkg WAKE_LOCK allow 2>/dev/null || true
-            cmd appops set $pkg 10008 allow 2>/dev/null || true
-            cmd appops set $pkg 10021 allow 2>/dev/null || true
-            am set-standby-bucket $pkg active 2>/dev/null || true
-            echo -900 > /proc/$myPid/oom_score_adj 2>/dev/null || true
-        """.trimIndent()
-        execRootCmd(cmd)
-        Log.i(TAG, "Applied battery whitelist and OOM protection for $pkg (pid $myPid)")
-    }
-
     private fun checkSu(): Boolean {
+        var process: Process? = null
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            Thread {
-                try {
-                    process.inputStream.bufferedReader().use { r ->
-                        while (r.readLine() != null) {}
-                    }
-                } catch (ignored: Exception) {}
-            }.apply { isDaemon = true; start() }
-            Thread {
-                try {
-                    process.errorStream.bufferedReader().use { r ->
-                        while (r.readLine() != null) {}
-                    }
-                } catch (ignored: Exception) {}
-            }.apply { isDaemon = true; start() }
-            val exitCode = process.waitFor()
-            Log.i(TAG, "checkSu exit code: $exitCode")
-            exitCode == 0
+            process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val line = reader.readLine()
+            val isRoot = line?.contains("uid=0") == true
+            process.waitFor()
+            isRoot
         } catch (e: Exception) {
-            Log.w(TAG, "checkSu error: ${e.message}")
             false
+        } finally {
+            try {
+                process?.destroy()
+            } catch (ignored: Exception) {}
         }
     }
-
-    private var lastWheelTime = 0L
 
     @Synchronized
     private fun getShellWriter(): BufferedWriter? {
-        if (suWriter != null && suProcess != null) {
-            try {
-                suProcess!!.exitValue()
-                suProcess = null
-                suWriter = null
-            } catch (e: IllegalThreadStateException) {
-                return suWriter
-            }
+        if (suWriter != null && suProcess?.isAlive == true) {
+            return suWriter
         }
+        try {
+            suProcess?.destroy()
+        } catch (ignored: Exception) {}
         try {
             val p = Runtime.getRuntime().exec("su")
             Thread {
                 try {
-                    p.inputStream.bufferedReader().use { r ->
-                        while (r.readLine() != null) {}
-                    }
+                    p.inputStream.bufferedReader().use { r -> while (r.readLine() != null) {} }
                 } catch (ignored: Exception) {}
             }.apply { isDaemon = true; start() }
             Thread {
                 try {
-                    p.errorStream.bufferedReader().use { r ->
-                        while (r.readLine() != null) {}
-                    }
+                    p.errorStream.bufferedReader().use { r -> while (r.readLine() != null) {} }
                 } catch (ignored: Exception) {}
             }.apply { isDaemon = true; start() }
             val writer = BufferedWriter(OutputStreamWriter(p.outputStream))
@@ -438,23 +453,6 @@ object RootInputManager {
                 suWriter = null
             }
         }
-    }
-
-    /**
-     * Wake screen and dismiss lockscreen keyguard if possible.
-     */
-    fun wakeAndDismissKeyguard() {
-        val realW = if (SCREEN_INFO.width > 0) SCREEN_INFO.width * SCREEN_INFO.scale else 1080
-        val realH = if (SCREEN_INFO.height > 0) SCREEN_INFO.height * SCREEN_INFO.scale else 2400
-        val midX = realW / 2
-        val startY = (realH * 0.85).toInt()
-        val endY = (realH * 0.20).toInt()
-
-        if (sendServerCommand("W")) {
-            sendServerCommand("S $midX $startY $midX $endY 250")
-            return
-        }
-        execRootCmd("input keyevent 224; sleep 0.15; wm dismiss-keyguard; input swipe $midX $startY $midX $endY 250")
     }
 
     /**
@@ -517,204 +515,54 @@ EOF
     }
 
     /**
-     * Dispatch mouse input via root without AccessibilityService.
+     * Silently enable RustDesk's Accessibility Service using root.
      */
-    fun onMouseInput(mask: Int, _x: Int, _y: Int) {
-        val x = max(0, _x) * SCREEN_INFO.scale
-        val y = max(0, _y) * SCREEN_INFO.scale
-
-        if (mask == 0 || mask == LEFT_MOVE) {
-            curX = x
-            curY = y
-            if (isDown) {
-                if (sendServerCommand("M $curX $curY")) {
-                    return
-                }
-            }
-            return
-        }
-
-        if (mask == LEFT_DOWN) {
-            downX = x
-            downY = y
-            curX = x
-            curY = y
-            downTime = SystemClock.uptimeMillis()
-            isDown = true
-            if (sendServerCommand("D $curX $curY")) {
-                return
-            }
-            return
-        }
-
-        if (mask == LEFT_UP) {
-            isDown = false
-            curX = x
-            curY = y
-            if (sendServerCommand("U $curX $curY")) {
-                return
-            }
-            // Fallback if server is not ready
-            val now = SystemClock.uptimeMillis()
-            val duration = max(50L, now - downTime)
-            val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-            if (dist < 25) {
-                if (duration < 400L) {
-                    execRootCmd("input tap $downX $downY")
-                } else {
-                    execRootCmd("input swipe $downX $downY $downX $downY 600")
-                }
-            } else {
-                val swipeDuration = max(100L, kotlin.math.min(400L, duration))
-                execRootCmd("input swipe $downX $downY $curX $curY $swipeDuration")
-            }
-            return
-        }
-
-        if (mask == RIGHT_UP || mask == BACK_UP) {
-            if (sendServerCommand("KC 4")) return
-            execRootCmd("input keyevent 4") // BACK
-            return
-        }
-
-        if (mask == WHEEL_BUTTON_UP) {
-            if (sendServerCommand("KC 3")) return
-            execRootCmd("input keyevent 3") // HOME
-            return
-        }
-
-        if (mask == WHEEL_DOWN) {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastWheelTime > 80L) {
-                lastWheelTime = now
-                val targetY = max(0, y - 350)
-                if (sendServerCommand("S $x $y $x $targetY 80")) {
-                    return
-                }
-                execRootCmd("input swipe $x $y $x $targetY 80")
-            }
-            return
-        }
-
-        if (mask == WHEEL_UP) {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastWheelTime > 80L) {
-                lastWheelTime = now
-                val targetY = y + 350
-                if (sendServerCommand("S $x $y $x $targetY 80")) {
-                    return
-                }
-                execRootCmd("input swipe $x $y $x $targetY 80")
-            }
-            return
-        }
+    fun enableAccessibilitySilently(context: Context) {
+        val serviceName = "${context.packageName}/com.carriez.flutter_hbb.InputService"
+        execRootCmd("""
+            current_services=$(settings get secure enabled_accessibility_services)
+            if [ -z "$current_services" ] || [ "$current_services" = "null" ]; then
+                new_services="$serviceName"
+            else
+                case ":$current_services:" in
+                    *":$serviceName:"*)
+                        new_services="$current_services"
+                        ;;
+                    *)
+                        new_services="${'$'}current_services:$serviceName"
+                        ;;
+                esac
+            fi
+            settings put secure enabled_accessibility_services "${'$'}new_services"
+            settings put secure accessibility_enabled 1
+        """.trimIndent())
     }
 
     /**
-     * Dispatch touch input via root without AccessibilityService.
+     * Disable battery optimization, set oom_adj and protect the process.
      */
-    fun onTouchInput(mask: Int, _x: Int, _y: Int) {
-        when (mask) {
-            TOUCH_PAN_START -> {
-                curX = max(0, _x) * SCREEN_INFO.scale
-                curY = max(0, _y) * SCREEN_INFO.scale
-                downX = curX
-                downY = curY
-                downTime = SystemClock.uptimeMillis()
-                isDown = true
-                if (sendServerCommand("D $curX $curY")) {
-                    return
-                }
-            }
-            TOUCH_PAN_UPDATE -> {
-                curX -= _x * SCREEN_INFO.scale
-                curY -= _y * SCREEN_INFO.scale
-                curX = max(0, curX)
-                curY = max(0, curY)
-                if (sendServerCommand("M $curX $curY")) {
-                    return
-                }
-            }
-            TOUCH_PAN_END -> {
-                isDown = false
-                if (sendServerCommand("U $curX $curY")) {
-                    curX = max(0, _x) * SCREEN_INFO.scale
-                    curY = max(0, _y) * SCREEN_INFO.scale
-                    return
-                }
-                // Fallback if server is not ready
-                val now = SystemClock.uptimeMillis()
-                val duration = max(50L, now - downTime)
-                val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                if (dist < 25) {
-                    if (duration < 400L) {
-                        execRootCmd("input tap $downX $downY")
-                    } else {
-                        execRootCmd("input swipe $downX $downY $downX $downY 600")
-                    }
-                } else {
-                    val swipeDuration = max(100L, kotlin.math.min(400L, duration))
-                    execRootCmd("input swipe $downX $downY $curX $curY $swipeDuration")
-                }
-                curX = max(0, _x) * SCREEN_INFO.scale
-                curY = max(0, _y) * SCREEN_INFO.scale
-            }
-        }
-    }
-
-    /**
-     * Dispatch key event via root without AccessibilityService.
-     */
-    @RequiresApi(Build.VERSION_CODES.N)
-    fun onKeyEvent(data: ByteArray) {
-        try {
-            val keyEvent = KeyEvent.parseFrom(data)
-            val keyboardMode = keyEvent.mode
-
-            var textToCommit: String? = null
-            if (keyEvent.hasSeq()) {
-                textToCommit = keyEvent.seq
-            } else if (keyboardMode == KeyboardMode.Legacy) {
-                if (keyEvent.hasChr() && (keyEvent.down || keyEvent.press)) {
-                    val chr = keyEvent.chr
-                    if (chr != null) {
-                        textToCommit = String(Character.toChars(chr))
-                    }
-                }
-            }
-
-            if (!textToCommit.isNullOrEmpty()) {
-                val escaped = textToCommit.replace("'", "'\\''")
-                execRootCmd("input text '$escaped'")
-                return
-            }
-
-            val androidKeyEvent = KeyEventConverter.toAndroidKeyEvent(keyEvent)
-            if (androidKeyEvent != null) {
-                val action = if (keyEvent.down) 0 else 1
-                if (sendServerCommand("K ${androidKeyEvent.keyCode} $action")) {
-                    return
-                }
-                execRootCmd("input keyevent ${androidKeyEvent.keyCode}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "onKeyEvent error: ${e.message}")
-        }
+    fun protectProcessAndWhitelist(context: Context) {
+        val pkg = context.packageName
+        execRootCmd("""
+            dumpsys deviceidle whitelist +$pkg 2>/dev/null || true
+            cmd deviceidle whitelist +$pkg 2>/dev/null || true
+            appops set $pkg RUN_IN_BACKGROUND allow 2>/dev/null || true
+            appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
+            appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
+            appops set $pkg START_FOREGROUND_SERVICES_FROM_BACKGROUND allow 2>/dev/null || true
+            pid=$(pidof $pkg)
+            if [ -n "${'$'}pid" ]; then
+                echo -1000 > /proc/${'$'}pid/oom_score_adj 2>/dev/null || true
+            fi
+        """.trimIndent())
     }
 
     /**
      * Release su and server resources when service destroyed.
      */
     fun destroy() {
-        sendServerCommand("Q")
-        try {
-            localSocketWriter?.close()
-        } catch (ignored: Exception) {}
-        try {
-            localSocket?.close()
-        } catch (ignored: Exception) {}
-        localSocketWriter = null
-        localSocket = null
+        enqueueCmd("EXIT")
+        isWorkerRunning = false
 
         try {
             serverWriter?.close()

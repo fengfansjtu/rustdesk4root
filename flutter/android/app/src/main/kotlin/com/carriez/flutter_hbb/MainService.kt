@@ -92,6 +92,7 @@ class MainService : Service() {
 
         val mode = RootInputManager.getInputControlMode(this)
         if (mode == RootInputManager.MODE_ROOT) {
+            RootInputManager.startServer(applicationContext)
             when (kind) {
                 0 -> RootInputManager.onTouchInput(mask, x, y)
                 1 -> RootInputManager.onMouseInput(mask, x, y)
@@ -124,6 +125,7 @@ class MainService : Service() {
         }
         val mode = RootInputManager.getInputControlMode(this)
         if (mode == RootInputManager.MODE_ROOT) {
+            RootInputManager.startServer(applicationContext)
             RootInputManager.onKeyEvent(input)
         } else {
             InputService.ctx?.onKeyEvent(input)
