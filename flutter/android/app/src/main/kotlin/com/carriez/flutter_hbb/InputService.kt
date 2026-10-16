@@ -106,12 +106,20 @@ class InputService : AccessibilityService() {
     fun onMouseInput(mask: Int, _x: Int, _y: Int) {
         val x = max(0, _x)
         val y = max(0, _y)
+        val scaledX = x * SCREEN_INFO.scale
+        val scaledY = y * SCREEN_INFO.scale
 
-        if (mask == 0 || mask == LEFT_MOVE) {
+        if (mask == 0) {
+            mouseX = scaledX
+            mouseY = scaledY
+            return
+        }
+
+        if (mask == LEFT_MOVE) {
             val oldX = mouseX
             val oldY = mouseY
-            mouseX = x * SCREEN_INFO.scale
-            mouseY = y * SCREEN_INFO.scale
+            mouseX = scaledX
+            mouseY = scaledY
             if (isWaitingLongPress) {
                 val delta = abs(oldX - mouseX) + abs(oldY - mouseY)
                 Log.d(logTag,"delta:$delta")
@@ -119,10 +127,16 @@ class InputService : AccessibilityService() {
                     isWaitingLongPress = false
                 }
             }
+            if (leftIsDown) {
+                continueGesture(mouseX, mouseY)
+            }
+            return
         }
 
         // left button down, was up
         if (mask == LEFT_DOWN) {
+            mouseX = scaledX
+            mouseY = scaledY
             isWaitingLongPress = true
             timer.schedule(object : TimerTask() {
                 override fun run() {
@@ -138,23 +152,18 @@ class InputService : AccessibilityService() {
             return
         }
 
-        // left down, was down
-        if (leftIsDown) {
-            continueGesture(mouseX, mouseY)
-        }
-
         // left up, was down
         if (mask == LEFT_UP) {
             if (leftIsDown) {
                 leftIsDown = false
                 isWaitingLongPress = false
                 endGesture(mouseX, mouseY)
-                return
             }
+            return
         }
 
         if (mask == RIGHT_UP) {
-            longPress(mouseX, mouseY)
+            longPress(scaledX, scaledY)
             return
         }
 
@@ -296,6 +305,7 @@ class InputService : AccessibilityService() {
         }
         touchPath.moveTo(x.toFloat(), y.toFloat())
         lastTouchGestureStartTime = System.currentTimeMillis()
+        stroke = null
         lastX = x
         lastY = y
     }
@@ -366,7 +376,7 @@ class InputService : AccessibilityService() {
             touchPath.lineTo(x.toFloat(), y.toFloat())
             var duration = System.currentTimeMillis() - lastTouchGestureStartTime
             if (duration <= 0) {
-                duration = 1
+                duration = 50
             }
             val stroke = GestureDescription.StrokeDescription(
                 touchPath,
@@ -380,10 +390,21 @@ class InputService : AccessibilityService() {
         } catch (e: Exception) {
             Log.e(logTag, "endGesture error:$e")
         }
+        touchPath = Path()
+        this.stroke = null
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
     private fun endGesture(x: Int, y: Int) {
+        if (stroke == null) {
+            performClick(x, y, 50L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                touchPath.reset()
+            } else {
+                touchPath = Path()
+            }
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             doDispatchGesture(x, y, false)
             touchPath.reset()
@@ -728,11 +749,11 @@ class InputService : AccessibilityService() {
         super.onServiceConnected()
         ctx = this
         notifyInputState()
-        val info = AccessibilityServiceInfo()
+        val info = serviceInfo ?: AccessibilityServiceInfo()
         if (Build.VERSION.SDK_INT >= 33) {
-            info.flags = FLAG_INPUT_METHOD_EDITOR or FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.flags = info.flags or FLAG_INPUT_METHOD_EDITOR or FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         } else {
-            info.flags = FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.flags = info.flags or FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
         setServiceInfo(info)
         fakeEditTextForTextStateCalculation = EditText(this)

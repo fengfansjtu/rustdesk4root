@@ -142,6 +142,8 @@ object RootInputManager {
             cmd appops set $pkg BOOT_COMPLETED allow 2>/dev/null || true
             cmd appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
             cmd appops set $pkg START_FOREGROUND allow 2>/dev/null || true
+            cmd appops set $pkg WAKE_LOCK allow 2>/dev/null || true
+            am set-standby-bucket $pkg active 2>/dev/null || true
             echo -900 > /proc/$myPid/oom_score_adj 2>/dev/null || true
         """.trimIndent()
         execRootCmd(cmd)

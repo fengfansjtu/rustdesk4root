@@ -65,6 +65,8 @@ const val VIDEO_KEY_FRAME_RATE = 30
 
 class MainService : Service() {
 
+    private var lastWakeOrDismissTime = 0L
+
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
@@ -72,17 +74,17 @@ class MainService : Service() {
 
         // turn on screen when screen off or dismiss keyguard
         if (!powerManager.isInteractive || keyguardManager?.isKeyguardLocked == true) {
-            if (!powerManager.isInteractive) {
-                if (wakeLock.isHeld) {
-                    wakeLock.release()
-                }
-                Log.d(logTag,"Turn on Screen")
-                wakeLock.acquire(5000)
-            }
-            if (RootInputManager.isRootAvailable()) {
-                RootInputManager.wakeAndDismissKeyguard()
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastWakeOrDismissTime > 2000L) {
+                lastWakeOrDismissTime = now
                 if (!powerManager.isInteractive) {
-                    scheduleCapturePipelineRefresh(300)
+                    safeAcquireWakeLock(5000)
+                }
+                if (RootInputManager.isRootAvailable()) {
+                    RootInputManager.wakeAndDismissKeyguard()
+                    if (!powerManager.isInteractive) {
+                        scheduleCapturePipelineRefresh(300)
+                    }
                 }
             }
         }
@@ -115,13 +117,14 @@ class MainService : Service() {
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustKeyEventInput(input: ByteArray) {
         if (!powerManager.isInteractive) {
-            if (wakeLock.isHeld) {
-                wakeLock.release()
-            }
-            wakeLock.acquire(5000)
-            if (RootInputManager.isRootAvailable()) {
-                RootInputManager.wakeAndDismissKeyguard()
-                scheduleCapturePipelineRefresh(300)
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastWakeOrDismissTime > 2000L) {
+                lastWakeOrDismissTime = now
+                safeAcquireWakeLock(5000)
+                if (RootInputManager.isRootAvailable()) {
+                    RootInputManager.wakeAndDismissKeyguard()
+                    scheduleCapturePipelineRefresh(300)
+                }
             }
         }
         val useInputService = InputService.isOpen
@@ -231,7 +234,26 @@ class MainService : Service() {
     private var serviceHandler: Handler? = null
 
     private val powerManager: PowerManager by lazy { applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager }
-    private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
+    private val wakeLock: PowerManager.WakeLock by lazy {
+        powerManager.newWakeLock(
+            PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK,
+            "rustdesk:wakelock"
+        ).apply {
+            setReferenceCounted(false)
+        }
+    }
+
+    private fun safeAcquireWakeLock(timeoutMs: Long = 5000L) {
+        try {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+            }
+            wakeLock.acquire(timeoutMs)
+            Log.d(logTag, "Safe acquired wakeLock for $timeoutMs ms")
+        } catch (e: Exception) {
+            Log.w(logTag, "safeAcquireWakeLock error: ${e.message}")
+        }
+    }
 
     companion object {
         private var _isReady = false // media permission ready status
@@ -366,9 +388,13 @@ class MainService : Service() {
         super.onCreate()
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
         acquireCpuWakeLock()
-        if (RootInputManager.isRootAvailable()) {
-            RootInputManager.protectProcessAndWhitelist(applicationContext)
-            RootInputManager.enableAccessibilitySilently(applicationContext)
+        RootInputManager.checkRootAsync { isRoot ->
+            if (isRoot) {
+                RootInputManager.protectProcessAndWhitelist(applicationContext)
+                if (!RootInputManager.userDisabled && !InputService.isOpen) {
+                    RootInputManager.enableAccessibilitySilently(applicationContext)
+                }
+            }
         }
         FFI.init(this)
         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
@@ -404,6 +430,11 @@ class MainService : Service() {
             } catch (ignored: Exception) {}
             screenStateReceiverRegistered = false
         }
+        try {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+            }
+        } catch (ignored: Exception) {}
         releaseCpuWakeLock()
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))

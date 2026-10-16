@@ -101,10 +101,13 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         RootInputManager.checkRootAsync { isRoot ->
-            if (isRoot && !RootInputManager.userDisabled && !InputService.isOpen) {
-                RootInputManager.enableAccessibilitySilently(activity)
+            if (isRoot) {
+                RootInputManager.protectProcessAndWhitelist(activity)
+                if (!RootInputManager.userDisabled && !InputService.isOpen) {
+                    RootInputManager.enableAccessibilitySilently(activity)
+                }
             }
-            val inputPer = InputService.isOpen || isRoot
+            val inputPer = InputService.isOpen || (isRoot && !RootInputManager.userDisabled)
             activity.runOnUiThread {
                 flutterMethodChannel?.invokeMethod(
                     "on_state_changed",
@@ -256,7 +259,7 @@ class MainActivity : FlutterActivity() {
         // `isFinishing` distinguishes the user really leaving from a destroy
         // for recreation (configuration change, "don't keep activities"),
         // which must not tear down a live session.
-        if (isFinishing) {
+        if (isFinishing && !MainService.isReady) {
             FFI.closeAllSessions()
         }
         mainService?.let {
@@ -366,7 +369,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "check_service" -> {
                     RootInputManager.checkRootAsync { isRoot ->
-                        val inputPer = InputService.isOpen || isRoot
+                        val inputPer = InputService.isOpen || (isRoot && !RootInputManager.userDisabled)
                         runOnUiThread {
                             Companion.flutterMethodChannel?.invokeMethod(
                                 "on_state_changed",
