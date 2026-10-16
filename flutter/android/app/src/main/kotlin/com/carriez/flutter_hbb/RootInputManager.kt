@@ -1,6 +1,8 @@
 package com.carriez.flutter_hbb
 
 import android.content.Context
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -33,6 +35,8 @@ object RootInputManager {
     // Scrcpy-style daemon server
     private var serverProcess: Process? = null
     private var serverWriter: BufferedWriter? = null
+    private var localSocket: LocalSocket? = null
+    private var localSocketWriter: BufferedWriter? = null
     @Volatile
     private var isServerReady = false
     @Volatile
@@ -162,6 +166,16 @@ object RootInputManager {
                     serverWriter = writer
                     isServerReady = true
                     Log.i(TAG, "RootInputServer connected and ready for low-latency injection.")
+                    // Continuously drain stdout to prevent pipe buffer from filling up
+                    val outReader = reader
+                    Thread {
+                        try {
+                            var l: String?
+                            while (outReader.readLine().also { l = it } != null) {
+                                Log.d(TAG, "RootInputServer OUT: $l")
+                            }
+                        } catch (ignored: Throwable) {}
+                    }.apply { isDaemon = true; start() }
                 } else {
                     Log.w(TAG, "RootInputServer unexpected response: $line, will fallback to su shell")
                     isServerReady = false
@@ -179,7 +193,53 @@ object RootInputManager {
         }.apply { isDaemon = true; start() }
     }
 
+    private var lastSocketConnectAttempt = 0L
+
+    @Synchronized
+    private fun getSocketWriter(): BufferedWriter? {
+        if (localSocketWriter != null && localSocket?.isConnected == true) {
+            return localSocketWriter
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastSocketConnectAttempt < 1000L) {
+            return null
+        }
+        lastSocketConnectAttempt = now
+        return try {
+            val socket = LocalSocket()
+            socket.connect(LocalSocketAddress(RootInputServer.SOCKET_NAME))
+            val writer = BufferedWriter(OutputStreamWriter(socket.outputStream))
+            localSocket = socket
+            localSocketWriter = writer
+            Log.i(TAG, "Connected to RootInputServer via LocalSocket successfully.")
+            writer
+        } catch (e: Exception) {
+            try { socket.close() } catch (ignored: Exception) {}
+            localSocket = null
+            localSocketWriter = null
+            null
+        }
+    }
+
     private fun sendServerCommand(cmd: String): Boolean {
+        // 1. Try ultra-fast LocalSocket first (<0.1ms latency)
+        val sockWriter = getSocketWriter()
+        if (sockWriter != null) {
+            try {
+                sockWriter.write(cmd)
+                sockWriter.write("\n")
+                sockWriter.flush()
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "LocalSocket write failed, closing socket: ${e.message}")
+                try { localSocketWriter?.close() } catch (ignored: Exception) {}
+                try { localSocket?.close() } catch (ignored: Exception) {}
+                localSocket = null
+                localSocketWriter = null
+            }
+        }
+
+        // 2. Fallback to app_process stdin pipe
         if (isServerReady && serverWriter != null) {
             try {
                 serverWriter?.write(cmd)
@@ -384,14 +444,16 @@ object RootInputManager {
      * Wake screen and dismiss lockscreen keyguard if possible.
      */
     fun wakeAndDismissKeyguard() {
-        if (sendServerCommand("W")) {
-            // Server wakes up and calls dismiss-keyguard
-        }
         val realW = if (SCREEN_INFO.width > 0) SCREEN_INFO.width * SCREEN_INFO.scale else 1080
         val realH = if (SCREEN_INFO.height > 0) SCREEN_INFO.height * SCREEN_INFO.scale else 2400
         val midX = realW / 2
         val startY = (realH * 0.85).toInt()
         val endY = (realH * 0.20).toInt()
+
+        if (sendServerCommand("W")) {
+            sendServerCommand("S $midX $startY $midX $endY 250")
+            return
+        }
         execRootCmd("input keyevent 224; sleep 0.15; wm dismiss-keyguard; input swipe $midX $startY $midX $endY 250")
     }
 
@@ -526,10 +588,10 @@ EOF
             if (now - lastWheelTime > 80L) {
                 lastWheelTime = now
                 val targetY = max(0, y - 350)
-                if (sendServerCommand("D $x $y") && sendServerCommand("M $x $targetY") && sendServerCommand("U $x $targetY")) {
+                if (sendServerCommand("S $x $y $x $targetY 80")) {
                     return
                 }
-                execRootCmd("input swipe $x $y $x $targetY 100")
+                execRootCmd("input swipe $x $y $x $targetY 80")
             }
             return
         }
@@ -539,10 +601,10 @@ EOF
             if (now - lastWheelTime > 80L) {
                 lastWheelTime = now
                 val targetY = y + 350
-                if (sendServerCommand("D $x $y") && sendServerCommand("M $x $targetY") && sendServerCommand("U $x $targetY")) {
+                if (sendServerCommand("S $x $y $x $targetY 80")) {
                     return
                 }
-                execRootCmd("input swipe $x $y $x $targetY 100")
+                execRootCmd("input swipe $x $y $x $targetY 80")
             }
             return
         }
@@ -645,6 +707,15 @@ EOF
      */
     fun destroy() {
         sendServerCommand("Q")
+        try {
+            localSocketWriter?.close()
+        } catch (ignored: Exception) {}
+        try {
+            localSocket?.close()
+        } catch (ignored: Exception) {}
+        localSocketWriter = null
+        localSocket = null
+
         try {
             serverWriter?.close()
         } catch (ignored: Exception) {}
