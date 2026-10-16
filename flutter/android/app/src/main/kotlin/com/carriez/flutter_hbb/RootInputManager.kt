@@ -199,10 +199,20 @@ object RootInputManager {
         }
     }
 
+    private var lastWheelTime = 0L
+
     @Synchronized
     private fun getShellWriter(): BufferedWriter? {
         if (suWriter != null && suProcess != null) {
-            return suWriter
+            try {
+                suProcess!!.exitValue()
+                // Process is terminated
+                suProcess = null
+                suWriter = null
+            } catch (e: IllegalThreadStateException) {
+                // Process is still running
+                return suWriter
+            }
         }
         try {
             val p = Runtime.getRuntime().exec("su")
@@ -273,7 +283,7 @@ object RootInputManager {
      * Wake screen and dismiss lockscreen keyguard if possible.
      */
     fun wakeAndDismissKeyguard() {
-        execRootCmd("input keyevent 224; wm dismiss-keyguard")
+        execRootCmd("input keyevent 224; wm dismiss-keyguard; input swipe 500 1500 500 300 150")
     }
 
     /**
@@ -311,19 +321,24 @@ object RootInputManager {
                 isDown = true
             }
             LEFT_UP -> {
-                if (isDown) {
-                    isDown = false
-                    val duration = max(50L, SystemClock.uptimeMillis() - downTime)
-                    val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                    if (dist < 25) {
-                        if (duration < 400L) {
-                            execRootCmd("input tap $downX $downY")
-                        } else {
-                            execRootCmd("input swipe $downX $downY $downX $downY $duration")
-                        }
+                val now = SystemClock.uptimeMillis()
+                val targetDownX = if (isDown) downX else x
+                val targetDownY = if (isDown) downY else y
+                val targetCurX = if (x > 0 || y > 0) x else curX
+                val targetCurY = if (x > 0 || y > 0) y else curY
+                val duration = if (isDown) max(50L, now - downTime) else 50L
+                isDown = false
+
+                val dist = hypot((targetCurX - targetDownX).toDouble(), (targetCurY - targetDownY).toDouble())
+                if (dist < 25) {
+                    if (duration < 400L) {
+                        execRootCmd("input tap $targetDownX $targetDownY")
                     } else {
-                        execRootCmd("input swipe $downX $downY $curX $curY $duration")
+                        execRootCmd("input swipe $targetDownX $targetDownY $targetDownX $targetDownY 600")
                     }
+                } else {
+                    val swipeDuration = max(100L, kotlin.math.min(400L, duration))
+                    execRootCmd("input swipe $targetDownX $targetDownY $targetCurX $targetCurY $swipeDuration")
                 }
             }
             RIGHT_UP -> {
@@ -336,14 +351,20 @@ object RootInputManager {
                 execRootCmd("input keyevent 3") // HOME
             }
             WHEEL_DOWN -> {
-                // Scroll down (finger swipe up)
-                val targetY = max(0, y - 350)
-                execRootCmd("input swipe $x $y $x $targetY 150")
+                val now = SystemClock.uptimeMillis()
+                if (now - lastWheelTime > 120L) {
+                    lastWheelTime = now
+                    val targetY = max(0, y - 350)
+                    execRootCmd("input swipe $x $y $x $targetY 100")
+                }
             }
             WHEEL_UP -> {
-                // Scroll up (finger swipe down)
-                val targetY = y + 350
-                execRootCmd("input swipe $x $y $x $targetY 150")
+                val now = SystemClock.uptimeMillis()
+                if (now - lastWheelTime > 120L) {
+                    lastWheelTime = now
+                    val targetY = y + 350
+                    execRootCmd("input swipe $x $y $x $targetY 100")
+                }
             }
         }
     }
@@ -371,21 +392,24 @@ object RootInputManager {
                 curY = max(0, curY)
             }
             TOUCH_PAN_END -> {
-                if (isDown) {
-                    isDown = false
-                    val duration = max(50L, SystemClock.uptimeMillis() - downTime)
-                    val endX = if (_x > 0 || _y > 0) (_x * SCREEN_INFO.scale) else curX
-                    val endY = if (_x > 0 || _y > 0) (_y * SCREEN_INFO.scale) else curY
-                    val dist = hypot((endX - downX).toDouble(), (endY - downY).toDouble())
-                    if (dist < 25) {
-                        if (duration < 400L) {
-                            execRootCmd("input tap $downX $downY")
-                        } else {
-                            execRootCmd("input swipe $downX $downY $downX $downY $duration")
-                        }
+                val now = SystemClock.uptimeMillis()
+                val targetDownX = if (isDown) downX else x
+                val targetDownY = if (isDown) downY else y
+                val targetEndX = if (_x > 0 || _y > 0) x else curX
+                val targetEndY = if (_x > 0 || _y > 0) y else curY
+                val duration = if (isDown) max(50L, now - downTime) else 50L
+                isDown = false
+
+                val dist = hypot((targetEndX - targetDownX).toDouble(), (targetEndY - targetDownY).toDouble())
+                if (dist < 25) {
+                    if (duration < 400L) {
+                        execRootCmd("input tap $targetDownX $targetDownY")
                     } else {
-                        execRootCmd("input swipe $downX $downY $endX $endY $duration")
+                        execRootCmd("input swipe $targetDownX $targetDownY $targetDownX $targetDownY 600")
                     }
+                } else {
+                    val swipeDuration = max(100L, kotlin.math.min(400L, duration))
+                    execRootCmd("input swipe $targetDownX $targetDownY $targetEndX $targetEndY $swipeDuration")
                 }
             }
         }

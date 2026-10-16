@@ -71,8 +71,9 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
-        // Turn on screen only when screen is physically off
-        if (!powerManager.isInteractive) {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isLocked = keyguardManager?.isKeyguardLocked == true
+        if (!powerManager.isInteractive || isLocked) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
@@ -100,7 +101,9 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustKeyEventInput(input: ByteArray) {
-        if (!powerManager.isInteractive) {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isLocked = keyguardManager?.isKeyguardLocked == true
+        if (!powerManager.isInteractive || isLocked) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
