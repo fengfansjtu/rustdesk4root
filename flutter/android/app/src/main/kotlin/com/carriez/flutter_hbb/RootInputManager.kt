@@ -243,8 +243,12 @@ object RootInputManager {
                     isDown = false
                     val duration = max(50L, System.currentTimeMillis() - downTime)
                     val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                    if (dist < 20 && duration < 500L) {
-                        execRootCmd("input tap $downX $downY")
+                    if (dist < 30) {
+                        if (duration < 500L) {
+                            execRootCmd("input tap $downX $downY")
+                        } else {
+                            execRootCmd("input swipe $downX $downY $downX $downY $duration")
+                        }
                     } else {
                         execRootCmd("input swipe $downX $downY $curX $curY $duration")
                     }
@@ -299,8 +303,12 @@ object RootInputManager {
                     isDown = false
                     val duration = max(50L, System.currentTimeMillis() - downTime)
                     val dist = hypot((curX - downX).toDouble(), (curY - downY).toDouble())
-                    if (dist < 20 && duration < 500L) {
-                        execRootCmd("input tap $downX $downY")
+                    if (dist < 30) {
+                        if (duration < 500L) {
+                            execRootCmd("input tap $downX $downY")
+                        } else {
+                            execRootCmd("input swipe $downX $downY $downX $downY $duration")
+                        }
                     } else {
                         execRootCmd("input swipe $downX $downY $curX $curY $duration")
                     }
