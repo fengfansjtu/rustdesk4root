@@ -91,16 +91,17 @@ object RootInputManager {
     fun enableAccessibilitySilently(context: Context) {
         val pkg = context.packageName
         val serviceName = "$pkg/${InputService::class.java.canonicalName}"
+        val d = '$'
         val cmd = """
             appops set $pkg ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
             appops set $pkg BIND_ACCESSIBILITY_SERVICE allow 2>/dev/null || true
-            current=$(settings get secure enabled_accessibility_services)
-            if [ "$current" = "null" ] || [ -z "$current" ]; then
+            current=${d}(settings get secure enabled_accessibility_services)
+            if [ "${d}current" = "null" ] || [ -z "${d}current" ]; then
                 settings put secure enabled_accessibility_services "$serviceName"
             else
-                case ":$current:" in
+                case ":${d}current:" in
                     *":$serviceName:"*) ;;
-                    *) settings put secure enabled_accessibility_services "$current:$serviceName" ;;
+                    *) settings put secure enabled_accessibility_services "${d}current:$serviceName" ;;
                 esac
             fi
             settings put secure accessibility_enabled 1
@@ -115,11 +116,12 @@ object RootInputManager {
     fun disableAccessibilitySilently(context: Context) {
         val pkg = context.packageName
         val serviceName = "$pkg/${InputService::class.java.canonicalName}"
+        val d = '$'
         val cmd = """
-            current=$(settings get secure enabled_accessibility_services)
-            if [ "$current" != "null" ] && [ -n "$current" ]; then
-                new_services=$(echo "$current" | tr ':' '\n' | grep -v "$serviceName" | tr '\n' ':' | sed 's/:$//')
-                settings put secure enabled_accessibility_services "$new_services"
+            current=${d}(settings get secure enabled_accessibility_services)
+            if [ "${d}current" != "null" ] && [ -n "${d}current" ]; then
+                new_services=${d}(echo "${d}current" | tr ':' '\n' | grep -v "$serviceName" | tr '\n' ':' | sed 's/:${d}//')
+                settings put secure enabled_accessibility_services "${d}new_services"
             fi
         """.trimIndent()
         execRootCmd(cmd)
