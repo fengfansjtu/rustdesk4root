@@ -24,6 +24,7 @@ import android.content.res.Configuration
 import android.content.res.Configuration.ORIENTATION_LANDSCAPE
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
 import android.hardware.display.VirtualDisplay
 import android.media.*
@@ -70,21 +71,14 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
-        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-
-        // turn on screen when screen off or dismiss keyguard
-        if (!powerManager.isInteractive || keyguardManager?.isKeyguardLocked == true) {
+        // Turn on screen only when screen is physically off
+        if (!powerManager.isInteractive) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
-                if (!powerManager.isInteractive) {
-                    safeAcquireWakeLock(5000)
-                }
+                safeAcquireWakeLock(5000)
                 if (RootInputManager.isRootAvailable()) {
                     RootInputManager.wakeAndDismissKeyguard()
-                    if (!powerManager.isInteractive) {
-                        scheduleCapturePipelineRefresh(300)
-                    }
                 }
             }
         }
@@ -123,7 +117,6 @@ class MainService : Service() {
                 safeAcquireWakeLock(5000)
                 if (RootInputManager.isRootAvailable()) {
                     RootInputManager.wakeAndDismissKeyguard()
-                    scheduleCapturePipelineRefresh(300)
                 }
             }
         }
@@ -171,6 +164,9 @@ class MainService : Service() {
                         translate("Share screen")
                     }
                     if (authorized) {
+                        if (!powerManager.isInteractive) {
+                            safeAcquireWakeLock(15000)
+                        }
                         if (RootInputManager.isRootAvailable()) {
                             RootInputManager.wakeAndDismissKeyguard()
                             RootInputManager.grantMediaProjectionPermission(this@MainService)
@@ -275,6 +271,7 @@ class MainService : Service() {
 
     // video
     private var mediaProjection: MediaProjection? = null
+    private var savedMediaProjectionIntent: Intent? = null
     private var mediaProjectionCallback: MediaProjection.Callback? = null
     private var captureRestartPending = false
     private var captureRestartInVoiceCall = false
@@ -335,13 +332,12 @@ class MainService : Service() {
     private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
         override fun onPaused() {
             Log.d(logTag, "VirtualDisplay onPaused")
-            serviceHandler?.removeCallbacks(refreshPipelineRunnable)
         }
 
         override fun onResumed() {
             Log.d(logTag, "VirtualDisplay onResumed")
             if (isStart && powerManager.isInteractive) {
-                scheduleCapturePipelineRefresh(150)
+                FFI.refreshScreen()
             }
         }
 
@@ -532,6 +528,7 @@ class MainService : Service() {
                 getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
             intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
+                savedMediaProjectionIntent = it
                 replaceMediaProjection(mediaProjectionManager, it)
             } ?: let {
                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
@@ -756,6 +753,11 @@ class MainService : Service() {
         if (isStart) {
             return true
         }
+        if (mediaProjection == null && savedMediaProjectionIntent != null) {
+            Log.d(logTag, "mediaProjection is null in startCapture, recovering using savedMediaProjectionIntent")
+            val mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            replaceMediaProjection(mediaProjectionManager, savedMediaProjectionIntent!!)
+        }
         if (mediaProjection == null) {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             return false
@@ -866,6 +868,7 @@ class MainService : Service() {
         }
 
         releaseMediaProjection()
+        savedMediaProjectionIntent = null
         mediaProjectionForegroundService = false
         microphoneForegroundService = false
         checkMediaPermission()
@@ -926,11 +929,25 @@ class MainService : Service() {
                 existingDisplay.setSurface(s)
                 true
             } else {
-                val display = mp.createVirtualDisplay(
-                    "RustDeskVD",
-                    SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    s, virtualDisplayCallback, serviceHandler
-                )
+                val displayFlags = if (RootInputManager.isRootAvailable()) {
+                    VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE
+                } else {
+                    VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+                }
+                val display = try {
+                    mp.createVirtualDisplay(
+                        "RustDeskVD",
+                        SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, displayFlags,
+                        s, virtualDisplayCallback, serviceHandler
+                    )
+                } catch (e: SecurityException) {
+                    Log.w(logTag, "createVirtualDisplay with SECURE flag failed, fallback without SECURE", e)
+                    mp.createVirtualDisplay(
+                        "RustDeskVD",
+                        SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        s, virtualDisplayCallback, serviceHandler
+                    )
+                }
                 if (display == null) {
                     Log.e(logTag, "createOrSetVirtualDisplay failed")
                     handleVirtualDisplayFailure()

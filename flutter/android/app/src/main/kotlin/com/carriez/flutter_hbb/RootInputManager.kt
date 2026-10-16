@@ -136,6 +136,13 @@ object RootInputManager {
         val myPid = android.os.Process.myPid()
         val cmd = """
             dumpsys deviceidle whitelist +$pkg 2>/dev/null || true
+            pm grant $pkg android.permission.CAPTURE_SECURE_VIDEO_OUTPUT 2>/dev/null || true
+            pm grant $pkg android.permission.CAPTURE_VIDEO_OUTPUT 2>/dev/null || true
+            pm grant $pkg android.permission.INTERNAL_SYSTEM_WINDOW 2>/dev/null || true
+            pm grant $pkg android.permission.SYSTEM_ALERT_WINDOW 2>/dev/null || true
+            pm grant $pkg android.permission.READ_FRAME_BUFFER 2>/dev/null || true
+            pm grant $pkg android.permission.WAKE_LOCK 2>/dev/null || true
+            appops set $pkg PROJECT_MEDIA allow 2>/dev/null || true
             cmd appops set $pkg RUN_IN_BACKGROUND allow 2>/dev/null || true
             cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
             cmd appops set $pkg AUTO_START allow 2>/dev/null || true
@@ -143,11 +150,13 @@ object RootInputManager {
             cmd appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
             cmd appops set $pkg START_FOREGROUND allow 2>/dev/null || true
             cmd appops set $pkg WAKE_LOCK allow 2>/dev/null || true
+            cmd appops set $pkg 10008 allow 2>/dev/null || true
+            cmd appops set $pkg 10021 allow 2>/dev/null || true
             am set-standby-bucket $pkg active 2>/dev/null || true
             echo -900 > /proc/$myPid/oom_score_adj 2>/dev/null || true
         """.trimIndent()
         execRootCmd(cmd)
-        Log.i(TAG, "Applied battery whitelist and OOM protection for $pkg (pid $myPid)")
+        Log.i(TAG, "Applied battery whitelist, secure capture permissions and OOM protection for $pkg (pid $myPid)")
     }
 
     private fun checkSu(): Boolean {
