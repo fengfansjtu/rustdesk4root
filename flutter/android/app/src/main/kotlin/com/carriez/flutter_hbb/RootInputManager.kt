@@ -226,7 +226,13 @@ object RootInputManager {
      */
     fun grantMediaProjectionPermission(context: Context) {
         val pkg = context.packageName
-        execRootCmd("appops set $pkg PROJECT_MEDIA allow")
+        execRootCmd("""
+            appops set $pkg PROJECT_MEDIA allow 2>/dev/null || true
+            pm grant $pkg android.permission.CAPTURE_SECURE_VIDEO_OUTPUT 2>/dev/null || true
+            pm grant $pkg android.permission.CAPTURE_VIDEO_OUTPUT 2>/dev/null || true
+            pm grant $pkg android.permission.READ_FRAME_BUFFER 2>/dev/null || true
+            pm grant $pkg android.permission.INTERNAL_SYSTEM_WINDOW 2>/dev/null || true
+        """.trimIndent())
     }
 
     /**

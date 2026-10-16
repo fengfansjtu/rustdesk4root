@@ -316,13 +316,13 @@ class MainService : Service() {
                 Intent.ACTION_SCREEN_ON -> {
                     Log.d(logTag, "Screen turned ON (ACTION_SCREEN_ON)")
                     if (isStart) {
-                        scheduleCapturePipelineRefresh(200)
+                        FFI.refreshScreen()
                     }
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     Log.d(logTag, "Device UNLOCKED (ACTION_USER_PRESENT)")
                     if (isStart) {
-                        scheduleCapturePipelineRefresh(150)
+                        FFI.refreshScreen()
                     }
                 }
             }
@@ -587,9 +587,6 @@ class MainService : Service() {
                             }
                         } catch (e: Exception) {
                             Log.w(logTag, "onImageAvailable error: ${e.message}")
-                            if (e is IllegalStateException && isStart && powerManager.isInteractive) {
-                                scheduleCapturePipelineRefresh(500)
-                            }
                         }
                     }, serviceHandler)
                 }

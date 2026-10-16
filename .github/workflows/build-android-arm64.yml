@@ -193,13 +193,14 @@ jobs:
           path: release-pkg/rustdesk-arm64-v8a-root.apk
 
       - name: Publish to GitHub Releases
-        if: github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/')
+        if: github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
-          name: RustDesk for Root (arm64) ${{ github.event.inputs.release_tag || github.ref_name }}
+          tag_name: ${{ github.event.inputs.release_tag || 'latest' }}
+          name: RustDesk for Root (arm64-v8a) Latest
           draft: false
           prerelease: false
+          make_latest: true
           files: release-pkg/rustdesk-arm64-v8a-root.apk
           body: |
             ### 📱 RustDesk Android 64-bit (arm64-v8a) Root 增强版
