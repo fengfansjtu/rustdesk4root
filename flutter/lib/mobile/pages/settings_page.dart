@@ -729,6 +729,22 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       },
     ));
 
+    if (isAndroid) {
+      enhancementsTiles.add(SettingsTile(
+        title: Text('Install Magisk Lockscreen Module'),
+        description: Text('Mounts RustDesk as a system privileged app to enable native 60fps hardware lock screen capture'),
+        trailing: Icon(Icons.security),
+        onPressed: (context) async {
+          final success = await gFFI.serverModel.installMagiskModule();
+          if (success) {
+            showToast('Module installed to /data/adb/modules/rustdesk_system_priv! Please reboot phone.');
+          } else {
+            showToast('Failed to install module. Please check root access.');
+          }
+        },
+      ));
+    }
+
     final disabledSettings = bind.isDisableSettings();
     final hideSecuritySettings =
         bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) == 'Y';

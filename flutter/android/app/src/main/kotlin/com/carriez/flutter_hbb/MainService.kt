@@ -22,6 +22,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.content.res.Configuration.ORIENTATION_LANDSCAPE
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -47,6 +49,7 @@ import kotlin.concurrent.thread
 import org.json.JSONException
 import org.json.JSONObject
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.min
 
@@ -82,6 +85,9 @@ class MainService : Service() {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
             }
+            if (isLocked) {
+                checkAndStartLockscreenCaptureIfNeeded()
+            }
         }
 
         val mode = RootInputManager.getInputControlMode(this)
@@ -111,6 +117,9 @@ class MainService : Service() {
                 if (RootInputManager.isRootAvailable()) {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
+            }
+            if (isLocked) {
+                checkAndStartLockscreenCaptureIfNeeded()
             }
         }
         val mode = RootInputManager.getInputControlMode(this)
@@ -159,12 +168,14 @@ class MainService : Service() {
                             safeAcquireWakeLock(15000)
                         }
                         if (RootInputManager.isRootAvailable()) {
+                            RootInputManager.startServer(this@MainService)
                             RootInputManager.wakeAndDismissKeyguard()
                             RootInputManager.grantMediaProjectionPermission(this@MainService)
                         }
                         if (!isFileTransfer && !isStart) {
                             startCapture()
                         }
+                        checkAndStartLockscreenCaptureIfNeeded()
                         onClientAuthorizedNotification(id, type, username, peerId)
                     } else {
                         loginRequestNotification(id, type, username, peerId)
@@ -306,12 +317,14 @@ class MainService : Service() {
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     Log.d(logTag, "Screen turned ON (ACTION_SCREEN_ON)")
+                    checkAndStartLockscreenCaptureIfNeeded()
                     if (isStart) {
                         FFI.refreshScreen()
                     }
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     Log.d(logTag, "Device UNLOCKED (ACTION_USER_PRESENT)")
+                    stopLockscreenCapture()
                     if (isStart) {
                         FFI.refreshScreen()
                     }
@@ -350,6 +363,77 @@ class MainService : Service() {
         serviceHandler?.postDelayed(refreshPipelineRunnable, delayMs)
     }
 
+    private var lockscreenCaptureThread: Thread? = null
+    @Volatile
+    private var isLockscreenCaptureActive = false
+
+    fun checkAndStartLockscreenCaptureIfNeeded() {
+        if (!RootInputManager.isRootAvailable() || !isStart) {
+            stopLockscreenCapture()
+            return
+        }
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isLocked = keyguardManager?.isKeyguardLocked == true
+        if (isLocked) {
+            startLockscreenCapture()
+        } else {
+            stopLockscreenCapture()
+        }
+    }
+
+    private fun startLockscreenCapture() {
+        if (isLockscreenCaptureActive) return
+        isLockscreenCaptureActive = true
+        lockscreenCaptureThread = Thread {
+            Log.i(logTag, "Lockscreen capture worker started.")
+            var buffer: ByteBuffer? = null
+            var lastCaptureTime = 0L
+
+            while (isLockscreenCaptureActive && isStart) {
+                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                if (keyguardManager?.isKeyguardLocked != true || !powerManager.isInteractive) {
+                    break
+                }
+
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastCaptureTime < 180) { // ~5-6 FPS, ideal for viewing lockscreen and entering credentials
+                    try { Thread.sleep(30) } catch (ignored: Exception) {}
+                    continue
+                }
+                lastCaptureTime = now
+
+                try {
+                    val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -p"))
+                    val bmp = BitmapFactory.decodeStream(p.inputStream)
+                    p.waitFor()
+                    if (bmp != null) {
+                        val w = bmp.width
+                        val h = bmp.height
+                        val size = w * h * 4
+                        if (buffer == null || buffer?.capacity() != size) {
+                            buffer = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
+                        }
+                        buffer?.rewind()
+                        bmp.copyPixelsToBuffer(buffer!!)
+                        buffer?.rewind()
+                        bmp.recycle()
+                        FFI.onVideoFrameUpdate(buffer!!)
+                    }
+                } catch (e: Exception) {
+                    Log.w(logTag, "Lockscreen capture error: ${e.message}")
+                    try { Thread.sleep(400) } catch (ignored: Exception) {}
+                }
+            }
+            isLockscreenCaptureActive = false
+            Log.i(logTag, "Lockscreen capture worker ended.")
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun stopLockscreenCapture() {
+        isLockscreenCaptureActive = false
+        lockscreenCaptureThread = null
+    }
+
     @Synchronized
     private fun acquireCpuWakeLock() {
         if (cpuWakeLock == null) {
@@ -381,6 +465,8 @@ class MainService : Service() {
                 val mode = RootInputManager.getInputControlMode(applicationContext)
                 if (mode == RootInputManager.MODE_ACCESSIBILITY && !RootInputManager.userDisabled && !InputService.isOpen) {
                     RootInputManager.enableAccessibilitySilently(applicationContext)
+                } else if (mode == RootInputManager.MODE_ROOT) {
+                    RootInputManager.startServer(applicationContext)
                 }
             }
         }
@@ -423,6 +509,7 @@ class MainService : Service() {
                 wakeLock.release()
             }
         } catch (ignored: Exception) {}
+        stopLockscreenCapture()
         releaseCpuWakeLock()
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
@@ -804,6 +891,7 @@ class MainService : Service() {
     @Synchronized
     fun stopCapture() {
         Log.d(logTag, "Stop Capture")
+        stopLockscreenCapture()
         captureRestartPending = false
         captureRestartInVoiceCall = false
         FFI.setFrameRawEnable("video",false)

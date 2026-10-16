@@ -88,6 +88,18 @@ class ServerModel with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> installMagiskModule() async {
+    if (isAndroid) {
+      try {
+        final res = await parent.target?.invokeMethod("install_magisk_module");
+        return res == true;
+      } catch (e) {
+        debugPrint("install_magisk_module error: $e");
+      }
+    }
+    return false;
+  }
+
   bool get audioOk => _audioOk;
 
   bool get fileOk => _fileOk;

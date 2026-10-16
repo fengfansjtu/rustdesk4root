@@ -364,6 +364,10 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(true)
                 }
+                "install_magisk_module" -> {
+                    val success = RootInputManager.installMagiskPrivilegedModule(context)
+                    result.success(success)
+                }
                 "get_input_mode" -> {
                     result.success(RootInputManager.getInputControlMode(context))
                 }
