@@ -1,6 +1,6 @@
 package com.carriez.flutter_hbb
 
-import android.hardware.input.InputManager
+import android.os.Looper
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.InputEvent
@@ -23,21 +23,12 @@ object RootInputServer {
     @JvmStatic
     fun main(args: Array<String>) {
         try {
-            val imClass = Class.forName("android.hardware.input.InputManager")
-            val getInstance = imClass.getDeclaredMethod("getInstance")
-            getInstance.isAccessible = true
-            inputManager = getInstance.invoke(null)
+            Looper.prepareMainLooper()
+        } catch (ignored: Throwable) {}
 
-            // injectInputEvent(InputEvent event, int mode)
-            // mode 0 = INJECT_INPUT_EVENT_MODE_ASYNC
-            injectMethod = imClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
-            injectMethod?.isAccessible = true
-        } catch (e: Throwable) {
-            System.err.println("RootInputServer: failed to initialize InputManager: ${e.message}")
-            e.printStackTrace()
-            System.exit(1)
-        }
+        initInputManager()
 
+        // Always notify parent process ready
         println("READY")
         System.out.flush()
 
@@ -51,6 +42,101 @@ object RootInputServer {
             } catch (t: Throwable) {
                 System.err.println("RootInputServer error on '$trimmed': ${t.message}")
             }
+        }
+    }
+
+    private fun initInputManager() {
+        // Strategy 1: ActivityThread systemContext -> getSystemService(INPUT_SERVICE)
+        try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            var at = try {
+                val sm = atClass.getDeclaredMethod("systemMain")
+                sm.isAccessible = true
+                sm.invoke(null)
+            } catch (t: Throwable) { null }
+
+            if (at == null) {
+                try {
+                    val atCtor = atClass.getDeclaredConstructor()
+                    atCtor.isAccessible = true
+                    at = atCtor.newInstance()
+                    val sCurrentField = atClass.getDeclaredField("sCurrentActivityThread")
+                    sCurrentField.isAccessible = true
+                    sCurrentField.set(null, at)
+                    val mSystemThread = atClass.getDeclaredField("mSystemThread")
+                    mSystemThread.isAccessible = true
+                    mSystemThread.setBoolean(at, true)
+                } catch (ignored: Throwable) {}
+            }
+
+            if (at != null) {
+                val getSysCtx = atClass.getDeclaredMethod("getSystemContext")
+                getSysCtx.isAccessible = true
+                val sysCtx = getSysCtx.invoke(at) as? android.content.Context
+                if (sysCtx != null) {
+                    inputManager = sysCtx.getSystemService(android.content.Context.INPUT_SERVICE)
+                }
+            }
+        } catch (t: Throwable) {
+            System.err.println("Strategy 1 error: ${t.message}")
+        }
+
+        // Strategy 2: InputManager.getInstance() (Android 7-13)
+        if (inputManager == null) {
+            try {
+                val imClass = Class.forName("android.hardware.input.InputManager")
+                val getInstance = imClass.getDeclaredMethod("getInstance")
+                getInstance.isAccessible = true
+                inputManager = getInstance.invoke(null)
+            } catch (t: Throwable) {
+                System.err.println("Strategy 2 error: ${t.message}")
+            }
+        }
+
+        // Strategy 3: InputManagerGlobal.getInstance() (Android 14+)
+        if (inputManager == null) {
+            try {
+                val imgClass = Class.forName("android.hardware.input.InputManagerGlobal")
+                val getInstance = imgClass.getDeclaredMethod("getInstance")
+                getInstance.isAccessible = true
+                inputManager = getInstance.invoke(null)
+            } catch (t: Throwable) {
+                System.err.println("Strategy 3 error: ${t.message}")
+            }
+        }
+
+        // Strategy 4: ServiceManager.getService("input") -> IInputManager.Stub.asInterface
+        if (inputManager == null) {
+            try {
+                val smClass = Class.forName("android.os.ServiceManager")
+                val getService = smClass.getMethod("getService", String::class.java)
+                val binder = getService.invoke(null, "input") as android.os.IBinder
+                val stubClass = Class.forName("android.hardware.input.IInputManager\$Stub")
+                val asInterface = stubClass.getMethod("asInterface", android.os.IBinder::class.java)
+                inputManager = asInterface.invoke(null, binder)
+            } catch (t: Throwable) {
+                System.err.println("Strategy 4 error: ${t.message}")
+            }
+        }
+
+        // Find injectInputEvent method on inputManager
+        if (inputManager != null) {
+            val imClass = inputManager!!.javaClass
+            for (m in imClass.methods) {
+                if (m.name == "injectInputEvent" && m.parameterTypes.isNotEmpty() &&
+                    InputEvent::class.java.isAssignableFrom(m.parameterTypes[0])) {
+                    m.isAccessible = true
+                    injectMethod = m
+                    break
+                }
+            }
+            if (injectMethod != null) {
+                System.err.println("RootInputServer: initialized injectMethod successfully (${imClass.name})")
+            } else {
+                System.err.println("RootInputServer: found inputManager (${imClass.name}) but no injectInputEvent method")
+            }
+        } else {
+            System.err.println("RootInputServer: could not initialize inputManager from any strategy")
         }
     }
 
@@ -89,7 +175,7 @@ object RootInputServer {
                 injectKey(KeyEvent.KEYCODE_WAKEUP, KeyEvent.ACTION_DOWN)
                 injectKey(KeyEvent.KEYCODE_WAKEUP, KeyEvent.ACTION_UP)
                 try {
-                    Runtime.getRuntime().exec("wm dismiss-keyguard").waitFor()
+                    Runtime.getRuntime().exec("wm dismiss-keyguard")
                 } catch (ignored: Throwable) {}
             }
             "P" -> { // PING
@@ -106,7 +192,16 @@ object RootInputServer {
         val event = MotionEvent.obtain(down, eventTime, action, x, y, 0)
         event.source = InputDevice.SOURCE_TOUCHSCREEN
         try {
-            injectMethod?.invoke(inputManager, event, 0)
+            if (injectMethod != null && inputManager != null) {
+                val paramCount = injectMethod!!.parameterTypes.size
+                if (paramCount == 2) {
+                    injectMethod?.invoke(inputManager, event, 0)
+                } else if (paramCount == 3) {
+                    injectMethod?.invoke(inputManager, event, 0, 0)
+                }
+            }
+        } catch (t: Throwable) {
+            System.err.println("injectMotion failed: ${t.message}")
         } finally {
             event.recycle()
         }
@@ -116,6 +211,17 @@ object RootInputServer {
         val now = SystemClock.uptimeMillis()
         val event = KeyEvent(now, now, action, keyCode, 0)
         event.source = InputDevice.SOURCE_KEYBOARD
-        injectMethod?.invoke(inputManager, event, 0)
+        try {
+            if (injectMethod != null && inputManager != null) {
+                val paramCount = injectMethod!!.parameterTypes.size
+                if (paramCount == 2) {
+                    injectMethod?.invoke(inputManager, event, 0)
+                } else if (paramCount == 3) {
+                    injectMethod?.invoke(inputManager, event, 0, 0)
+                }
+            }
+        } catch (t: Throwable) {
+            System.err.println("injectKey failed: ${t.message}")
+        }
     }
 }

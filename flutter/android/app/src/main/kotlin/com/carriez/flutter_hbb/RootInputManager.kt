@@ -122,30 +122,40 @@ object RootInputManager {
         if (isStartingServer) return
         isStartingServer = true
 
-        executor.execute {
+        Thread {
+            var p: Process? = null
+            var writer: BufferedWriter? = null
+            var reader: BufferedReader? = null
             try {
                 val apkPath = context.packageCodePath
                 Log.i(TAG, "Launching RootInputServer from $apkPath ...")
-                val p = Runtime.getRuntime().exec("su")
-                val writer = BufferedWriter(OutputStreamWriter(p.outputStream))
-                val reader = BufferedReader(InputStreamReader(p.inputStream))
+                p = Runtime.getRuntime().exec("su")
+                writer = BufferedWriter(OutputStreamWriter(p.outputStream))
+                reader = BufferedReader(InputStreamReader(p.inputStream))
 
+                val errReader = p.errorStream.bufferedReader()
                 Thread {
                     try {
-                        p.errorStream.bufferedReader().use { r ->
-                            var line: String?
-                            while (r.readLine().also { line = it } != null) {
-                                Log.d(TAG, "RootInputServer ERR: $line")
-                            }
+                        var line: String?
+                        while (errReader.readLine().also { line = it } != null) {
+                            Log.d(TAG, "RootInputServer ERR: $line")
                         }
-                    } catch (ignored: Exception) {}
+                    } catch (ignored: Throwable) {}
                 }.apply { isDaemon = true; start() }
 
                 writer.write("export CLASSPATH=$apkPath\n")
-                writer.write("exec app_process /system/bin com.carriez.flutter_hbb.RootInputServer\n")
+                writer.write("exec app_process / com.carriez.flutter_hbb.RootInputServer\n")
                 writer.flush()
 
-                val line = reader.readLine()
+                var line: String? = null
+                val readThread = Thread {
+                    try {
+                        line = reader.readLine()
+                    } catch (ignored: Throwable) {}
+                }
+                readThread.start()
+                readThread.join(3000)
+
                 Log.i(TAG, "RootInputServer response: $line")
                 if (line == "READY") {
                     serverProcess = p
@@ -155,14 +165,18 @@ object RootInputManager {
                 } else {
                     Log.w(TAG, "RootInputServer unexpected response: $line, will fallback to su shell")
                     isServerReady = false
+                    try { writer.close() } catch (ignored: Throwable) {}
+                    try { p.destroy() } catch (ignored: Throwable) {}
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e(TAG, "Failed to start RootInputServer", e)
                 isServerReady = false
+                try { writer?.close() } catch (ignored: Throwable) {}
+                try { p?.destroy() } catch (ignored: Throwable) {}
             } finally {
                 isStartingServer = false
             }
-        }
+        }.apply { isDaemon = true; start() }
     }
 
     private fun sendServerCommand(cmd: String): Boolean {
@@ -373,9 +387,11 @@ object RootInputManager {
         if (sendServerCommand("W")) {
             // Server wakes up and calls dismiss-keyguard
         }
-        val midX = if (SCREEN_INFO.width > 0) SCREEN_INFO.width / 2 else 540
-        val startY = if (SCREEN_INFO.height > 0) (SCREEN_INFO.height * 0.85).toInt() else 1800
-        val endY = if (SCREEN_INFO.height > 0) (SCREEN_INFO.height * 0.20).toInt() else 400
+        val realW = if (SCREEN_INFO.width > 0) SCREEN_INFO.width * SCREEN_INFO.scale else 1080
+        val realH = if (SCREEN_INFO.height > 0) SCREEN_INFO.height * SCREEN_INFO.scale else 2400
+        val midX = realW / 2
+        val startY = (realH * 0.85).toInt()
+        val endY = (realH * 0.20).toInt()
         execRootCmd("input keyevent 224; sleep 0.15; wm dismiss-keyguard; input swipe $midX $startY $midX $endY 250")
     }
 

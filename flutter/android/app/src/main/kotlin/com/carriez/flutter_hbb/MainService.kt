@@ -375,6 +375,10 @@ class MainService : Service() {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
         if (isLocked) {
+            if (!powerManager.isInteractive) {
+                safeAcquireWakeLock(5000)
+                RootInputManager.wakeAndDismissKeyguard()
+            }
             startLockscreenCapture()
         } else {
             stopLockscreenCapture()
@@ -391,8 +395,13 @@ class MainService : Service() {
 
             while (isLockscreenCaptureActive && isStart) {
                 val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                if (keyguardManager?.isKeyguardLocked != true || !powerManager.isInteractive) {
+                if (keyguardManager?.isKeyguardLocked != true) {
                     break
+                }
+                if (!powerManager.isInteractive) {
+                    safeAcquireWakeLock(5000)
+                    RootInputManager.wakeAndDismissKeyguard()
+                    try { Thread.sleep(200) } catch (ignored: Exception) {}
                 }
 
                 val now = SystemClock.elapsedRealtime()
@@ -407,16 +416,23 @@ class MainService : Service() {
                     val bmp = BitmapFactory.decodeStream(p.inputStream)
                     p.waitFor()
                     if (bmp != null) {
-                        val w = bmp.width
-                        val h = bmp.height
-                        val size = w * h * 4
+                        val targetW = if (SCREEN_INFO.width > 0) SCREEN_INFO.width else bmp.width
+                        val targetH = if (SCREEN_INFO.height > 0) SCREEN_INFO.height else bmp.height
+                        val scaled = if (bmp.width != targetW || bmp.height != targetH) {
+                            Bitmap.createScaledBitmap(bmp, targetW, targetH, true).also {
+                                bmp.recycle()
+                            }
+                        } else {
+                            bmp
+                        }
+                        val size = targetW * targetH * 4
                         if (buffer == null || buffer?.capacity() != size) {
                             buffer = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
                         }
                         buffer?.rewind()
-                        bmp.copyPixelsToBuffer(buffer!!)
+                        scaled.copyPixelsToBuffer(buffer!!)
                         buffer?.rewind()
-                        bmp.recycle()
+                        scaled.recycle()
                         FFI.onVideoFrameUpdate(buffer!!)
                     }
                 } catch (e: Exception) {
@@ -426,6 +442,9 @@ class MainService : Service() {
             }
             isLockscreenCaptureActive = false
             Log.i(logTag, "Lockscreen capture worker ended.")
+            if (isStart) {
+                FFI.refreshScreen()
+            }
         }.apply { isDaemon = true; start() }
     }
 
