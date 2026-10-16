@@ -207,14 +207,14 @@ object RootInputManager {
         lastSocketConnectAttempt = now
         return try {
             val socket = LocalSocket()
+            localSocket = socket
             socket.connect(LocalSocketAddress(RootInputServer.SOCKET_NAME))
             val writer = BufferedWriter(OutputStreamWriter(socket.outputStream))
-            localSocket = socket
             localSocketWriter = writer
             Log.i(TAG, "Connected to RootInputServer via LocalSocket successfully.")
             writer
         } catch (e: Exception) {
-            try { socket.close() } catch (ignored: Exception) {}
+            try { localSocket?.close() } catch (ignored: Exception) {}
             localSocket = null
             localSocketWriter = null
             null
