@@ -519,21 +519,22 @@ EOF
      */
     fun enableAccessibilitySilently(context: Context) {
         val serviceName = "${context.packageName}/com.carriez.flutter_hbb.InputService"
+        val d = '$'
         execRootCmd("""
-            current_services=$(settings get secure enabled_accessibility_services)
-            if [ -z "$current_services" ] || [ "$current_services" = "null" ]; then
+            current_services=${d}(settings get secure enabled_accessibility_services)
+            if [ -z "${d}current_services" ] || [ "${d}current_services" = "null" ]; then
                 new_services="$serviceName"
             else
-                case ":$current_services:" in
+                case ":${d}current_services:" in
                     *":$serviceName:"*)
-                        new_services="$current_services"
+                        new_services="${d}current_services"
                         ;;
                     *)
-                        new_services="${'$'}current_services:$serviceName"
+                        new_services="${d}current_services:$serviceName"
                         ;;
                 esac
             fi
-            settings put secure enabled_accessibility_services "${'$'}new_services"
+            settings put secure enabled_accessibility_services "${d}new_services"
             settings put secure accessibility_enabled 1
         """.trimIndent())
     }
@@ -543,6 +544,7 @@ EOF
      */
     fun protectProcessAndWhitelist(context: Context) {
         val pkg = context.packageName
+        val d = '$'
         execRootCmd("""
             dumpsys deviceidle whitelist +$pkg 2>/dev/null || true
             cmd deviceidle whitelist +$pkg 2>/dev/null || true
@@ -550,9 +552,9 @@ EOF
             appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
             appops set $pkg SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
             appops set $pkg START_FOREGROUND_SERVICES_FROM_BACKGROUND allow 2>/dev/null || true
-            pid=$(pidof $pkg)
-            if [ -n "${'$'}pid" ]; then
-                echo -1000 > /proc/${'$'}pid/oom_score_adj 2>/dev/null || true
+            pid=${d}(pidof $pkg)
+            if [ -n "${d}pid" ]; then
+                echo -1000 > /proc/${d}pid/oom_score_adj 2>/dev/null || true
             fi
         """.trimIndent())
     }
