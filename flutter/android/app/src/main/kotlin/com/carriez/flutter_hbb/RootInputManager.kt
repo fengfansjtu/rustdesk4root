@@ -64,10 +64,15 @@ object RootInputManager {
     private val executor = Executors.newSingleThreadExecutor()
 
     // Tracking state
+    private var downX = 0
+    private var downY = 0
+    private var downTime = 0L
     private var curX = 0
     private var curY = 0
     private var leftButtonDown = false
     private var isPanDown = false
+    private var wasServerMouseDownSent = false
+    private var wasServerTouchDownSent = false
 
     fun getInputControlMode(context: Context): String {
         val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
@@ -181,32 +186,33 @@ object RootInputManager {
             } catch (ignored: Throwable) {}
         }, "RootInputErrReader").apply { isDaemon = true; start() }
 
-        out.write("export CLASSPATH=\"$apkPath\"; exec app_process /system/bin $className\n")
+        out.write("export CLASSPATH=\"$apkPath\"; if [ -x /system/bin/app_process ]; then exec /system/bin/app_process / $className; else exec app_process / $className; fi\n")
         out.flush()
 
-        var line: String? = null
-        val timeout = SystemClock.uptimeMillis() + 4000L
-        while (SystemClock.uptimeMillis() < timeout) {
-            if (inp.ready()) {
-                line = inp.readLine()
-                Log.d(TAG, "[Server-OUT] $line")
-                if (line != null && line.contains("RUSTDESK_ROOT_SERVER_READY")) {
-                    serverWriter = out
-                    isServerReady = true
-                    Log.i(TAG, "RootInputServer is READY via high-speed anonymous pipe!")
-                    break
+        val readThread = Thread({
+            try {
+                var line: String?
+                while (inp.readLine().also { line = it } != null) {
+                    Log.d(TAG, "[Server-OUT] $line")
+                    if (line!!.contains("RUSTDESK_ROOT_SERVER_READY")) {
+                        serverWriter = out
+                        isServerReady = true
+                        Log.i(TAG, "RootInputServer is READY via high-speed anonymous pipe!")
+                        break
+                    }
                 }
-            } else {
-                SystemClock.sleep(50)
-            }
-        }
+            } catch (ignored: Throwable) {}
+        }, "RootInputOutReader")
+        readThread.isDaemon = true
+        readThread.start()
+        readThread.join(3500)
 
         if (!isServerReady) {
             try { out.close() } catch (ignored: Throwable) {}
             try { proc.destroy() } catch (ignored: Throwable) {}
             serverWriter = null
             serverProcess = null
-            throw RuntimeException("RootInputServer failed to report READY: last line='$line'")
+            throw RuntimeException("RootInputServer failed to report READY")
         }
     }
 
@@ -241,16 +247,26 @@ object RootInputManager {
             // CRITICAL: Only send MOVE when left button is pressed (dragging)!
             // Moving mouse without left button NEVER injects events, completely eliminating system mouse cursors!
             if (leftButtonDown) {
-                enqueueCmd("M $curX $curY")
+                if (isServerReady) {
+                    enqueueCmd("M $curX $curY")
+                }
             }
             return
         }
 
         if (mask == LEFT_DOWN) {
+            downX = x
+            downY = y
             curX = x
             curY = y
+            downTime = SystemClock.uptimeMillis()
             leftButtonDown = true
-            enqueueCmd("D $curX $curY")
+            if (isServerReady) {
+                enqueueCmd("D $curX $curY")
+                wasServerMouseDownSent = true
+            } else {
+                wasServerMouseDownSent = false
+            }
             return
         }
 
@@ -259,30 +275,64 @@ object RootInputManager {
             curY = y
             if (leftButtonDown) {
                 leftButtonDown = false
-                enqueueCmd("U $curX $curY")
+                if (isServerReady && wasServerMouseDownSent) {
+                    enqueueCmd("U $curX $curY")
+                    wasServerMouseDownSent = false
+                    return
+                }
+                wasServerMouseDownSent = false
+                // Fallback to direct root input if server is not ready or down event wasn't sent to server!
+                val duration = SystemClock.uptimeMillis() - downTime
+                val dist = kotlin.math.hypot((curX - downX).toDouble(), (curY - downY).toDouble())
+                if (dist < 25) {
+                    if (duration < 400L) {
+                        execRootCmd("input tap $downX $downY")
+                    } else {
+                        execRootCmd("input swipe $downX $downY $downX $downY 600")
+                    }
+                } else {
+                    val swipeDuration = kotlin.math.max(100L, kotlin.math.min(400L, duration))
+                    execRootCmd("input swipe $downX $downY $curX $curY $swipeDuration")
+                }
             }
             return
         }
 
         if (mask == RIGHT_UP || mask == BACK_UP) {
-            enqueueCmd("K 4") // KEYCODE_BACK
+            if (isServerReady) {
+                enqueueCmd("K 4") // KEYCODE_BACK
+            } else {
+                execRootCmd("input keyevent 4")
+            }
             return
         }
 
         if (mask == WHEEL_BUTTON_UP) {
-            enqueueCmd("K 3") // KEYCODE_HOME
+            if (isServerReady) {
+                enqueueCmd("K 3") // KEYCODE_HOME
+            } else {
+                execRootCmd("input keyevent 3")
+            }
             return
         }
 
         if (mask == WHEEL_DOWN) {
             val targetY = max(0, curY - 350)
-            enqueueCmd("S $curX $curY $curX $targetY 100")
+            if (isServerReady) {
+                enqueueCmd("S $curX $curY $curX $targetY 100")
+            } else {
+                execRootCmd("input swipe $curX $curY $curX $targetY 100")
+            }
             return
         }
 
         if (mask == WHEEL_UP) {
             val targetY = curY + 350
-            enqueueCmd("S $curX $curY $curX $targetY 100")
+            if (isServerReady) {
+                enqueueCmd("S $curX $curY $curX $targetY 100")
+            } else {
+                execRootCmd("input swipe $curX $curY $curX $targetY 100")
+            }
             return
         }
     }
@@ -297,19 +347,41 @@ object RootInputManager {
             TOUCH_PAN_START -> {
                 curX = max(0, _x) * scale
                 curY = max(0, _y) * scale
+                downX = curX
+                downY = curY
+                downTime = SystemClock.uptimeMillis()
                 isPanDown = true
-                enqueueCmd("D $curX $curY")
+                if (isServerReady) {
+                    enqueueCmd("D $curX $curY")
+                    wasServerTouchDownSent = true
+                } else {
+                    wasServerTouchDownSent = false
+                }
             }
             TOUCH_PAN_UPDATE -> {
-                // InputService accumulated delta
                 curX = max(0, curX - _x * scale)
                 curY = max(0, curY - _y * scale)
-                enqueueCmd("M $curX $curY")
+                if (isServerReady && wasServerTouchDownSent) {
+                    enqueueCmd("M $curX $curY")
+                }
             }
             TOUCH_PAN_END -> {
                 if (isPanDown) {
                     isPanDown = false
-                    enqueueCmd("U $curX $curY")
+                    if (isServerReady && wasServerTouchDownSent) {
+                        enqueueCmd("U $curX $curY")
+                        wasServerTouchDownSent = false
+                    } else {
+                        wasServerTouchDownSent = false
+                        val duration = SystemClock.uptimeMillis() - downTime
+                        val dist = kotlin.math.hypot((curX - downX).toDouble(), (curY - downY).toDouble())
+                        if (dist < 25) {
+                            execRootCmd("input tap $downX $downY")
+                        } else {
+                            val swipeDuration = kotlin.math.max(100L, kotlin.math.min(400L, duration))
+                            execRootCmd("input swipe $downX $downY $curX $curY $swipeDuration")
+                        }
+                    }
                 }
                 curX = max(0, _x) * scale
                 curY = max(0, _y) * scale
@@ -346,10 +418,16 @@ object RootInputManager {
 
             val androidKeyEvent = KeyEventConverter.toAndroidKeyEvent(keyEvent)
             if (androidKeyEvent != null) {
-                if (keyEvent.down) {
-                    enqueueCmd("KD ${androidKeyEvent.keyCode}")
+                if (isServerReady) {
+                    if (keyEvent.down) {
+                        enqueueCmd("KD ${androidKeyEvent.keyCode}")
+                    } else {
+                        enqueueCmd("KU ${androidKeyEvent.keyCode}")
+                    }
                 } else {
-                    enqueueCmd("KU ${androidKeyEvent.keyCode}")
+                    if (keyEvent.down) {
+                        execRootCmd("input keyevent ${androidKeyEvent.keyCode}")
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -386,9 +464,19 @@ object RootInputManager {
         }
     }
 
+    private fun isProcAlive(p: Process?): Boolean {
+        if (p == null) return false
+        return try {
+            p.exitValue()
+            false
+        } catch (e: IllegalThreadStateException) {
+            true
+        }
+    }
+
     @Synchronized
     private fun getShellWriter(): BufferedWriter? {
-        if (suWriter != null && suProcess?.isAlive == true) {
+        if (suWriter != null && isProcAlive(suProcess)) {
             return suWriter
         }
         try {
@@ -445,12 +533,16 @@ object RootInputManager {
                     }.apply { isDaemon = true; start() }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error executing root command: $cmd", e)
+                Log.e(TAG, "Error executing root command via persistent shell: $cmd, retrying one-shot su", e)
                 try {
                     suProcess?.destroy()
                 } catch (ignored: Exception) {}
                 suProcess = null
                 suWriter = null
+                try {
+                    val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                    p.waitFor()
+                } catch (ignored: Exception) {}
             }
         }
     }

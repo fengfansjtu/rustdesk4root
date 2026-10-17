@@ -49,6 +49,12 @@ object RootInputServer {
         try {
             initReflection()
 
+            if (inputManager == null || injectInputEventMethod == null) {
+                System.err.println("RootInputServer: FATAL - could not find inputManager or injectInputEventMethod, exiting so daemon fallback engages.")
+                System.exit(1)
+                return
+            }
+
             // Notify parent process via stdout that RootInputServer is ready
             println("RUSTDESK_ROOT_SERVER_READY")
             System.out.flush()
@@ -64,43 +70,19 @@ object RootInputServer {
         } catch (e: Throwable) {
             System.err.println("RootInputServer fatal error: ${e.message}")
             e.printStackTrace(System.err)
+            System.exit(1)
         }
     }
 
     private fun initReflection() {
-        // Strategy 1: ActivityThread systemContext -> getSystemService(INPUT_SERVICE)
-        try {
-            val atClass = Class.forName("android.app.ActivityThread")
-            var at = try {
-                val sm = atClass.getDeclaredMethod("systemMain")
-                sm.isAccessible = true
-                sm.invoke(null)
-            } catch (t: Throwable) { null }
-
-            if (at == null) {
-                try {
-                    val atCtor = atClass.getDeclaredConstructor()
-                    atCtor.isAccessible = true
-                    at = atCtor.newInstance()
-                    val sCurrentField = atClass.getDeclaredField("sCurrentActivityThread")
-                    sCurrentField.isAccessible = true
-                    sCurrentField.set(null, at)
-                    val mSystemThread = atClass.getDeclaredField("mSystemThread")
-                    mSystemThread.isAccessible = true
-                    mSystemThread.setBoolean(at, true)
-                } catch (ignored: Throwable) {}
-            }
-
-            if (at != null) {
-                val getSysCtx = atClass.getDeclaredMethod("getSystemContext")
-                getSysCtx.isAccessible = true
-                val sysCtx = getSysCtx.invoke(at) as? android.content.Context
-                if (sysCtx != null) {
-                    inputManager = sysCtx.getSystemService(android.content.Context.INPUT_SERVICE)
-                }
-            }
-        } catch (t: Throwable) {
-            System.err.println("Strategy 1 error: ${t.message}")
+        // Strategy 1: InputManager.getInstance() (Android 7~13)
+        if (inputManager == null) {
+            try {
+                val imClass = InputManager::class.java
+                val getInstance = imClass.getDeclaredMethod("getInstance")
+                getInstance.isAccessible = true
+                inputManager = getInstance.invoke(null)
+            } catch (ignored: Throwable) {}
         }
 
         // Strategy 2: InputManagerGlobal (Android 14+)
@@ -113,17 +95,7 @@ object RootInputServer {
             } catch (ignored: Throwable) {}
         }
 
-        // Strategy 3: InputManager.getInstance() (Android 7~13)
-        if (inputManager == null) {
-            try {
-                val imClass = InputManager::class.java
-                val getInstance = imClass.getDeclaredMethod("getInstance")
-                getInstance.isAccessible = true
-                inputManager = getInstance.invoke(null)
-            } catch (ignored: Throwable) {}
-        }
-
-        // Strategy 4: ServiceManager.getService("input") -> IInputManager.Stub.asInterface
+        // Strategy 3: ServiceManager.getService("input") -> IInputManager.Stub.asInterface
         if (inputManager == null) {
             try {
                 val smClass = Class.forName("android.os.ServiceManager")
@@ -135,21 +107,43 @@ object RootInputServer {
             } catch (ignored: Throwable) {}
         }
 
+        // Strategy 4: ActivityThread systemContext fallback
+        if (inputManager == null) {
+            try {
+                val atClass = Class.forName("android.app.ActivityThread")
+                val sm = atClass.getDeclaredMethod("systemMain")
+                sm.isAccessible = true
+                val at = sm.invoke(null)
+                if (at != null) {
+                    val getSysCtx = atClass.getDeclaredMethod("getSystemContext")
+                    getSysCtx.isAccessible = true
+                    val sysCtx = getSysCtx.invoke(at) as? android.content.Context
+                    if (sysCtx != null) {
+                        inputManager = sysCtx.getSystemService(android.content.Context.INPUT_SERVICE)
+                    }
+                }
+            } catch (ignored: Throwable) {}
+        }
+
         // Locate injectInputEvent method
         if (inputManager != null) {
-            val imClass = inputManager!!.javaClass
-            for (m in imClass.methods) {
-                if (m.name == "injectInputEvent" && m.parameterTypes.isNotEmpty() &&
-                    InputEvent::class.java.isAssignableFrom(m.parameterTypes[0])) {
-                    m.isAccessible = true
-                    injectInputEventMethod = m
-                    break
+            var curr: Class<*>? = inputManager!!.javaClass
+            while (curr != null && curr != Any::class.java) {
+                for (m in curr.declaredMethods) {
+                    if (m.name == "injectInputEvent" && m.parameterTypes.isNotEmpty() &&
+                        InputEvent::class.java.isAssignableFrom(m.parameterTypes[0])) {
+                        m.isAccessible = true
+                        injectInputEventMethod = m
+                        break
+                    }
                 }
+                if (injectInputEventMethod != null) break
+                curr = curr.superclass
             }
             if (injectInputEventMethod != null) {
-                System.err.println("RootInputServer: initialized injectInputEvent successfully (${imClass.name})")
+                System.err.println("RootInputServer: initialized injectInputEvent successfully (${inputManager!!.javaClass.name})")
             } else {
-                System.err.println("RootInputServer: found inputManager (${imClass.name}) but no injectInputEvent method")
+                System.err.println("RootInputServer: found inputManager (${inputManager!!.javaClass.name}) but no injectInputEvent method")
             }
         } else {
             System.err.println("RootInputServer: could not initialize inputManager from any strategy")
@@ -202,7 +196,8 @@ object RootInputServer {
                     val y = parts[2].toFloat()
                     val now = SystemClock.uptimeMillis()
                     if (isTouching) {
-                        injectMotion(MotionEvent.ACTION_UP, currentDownTime, now, x, y)
+                        val upTime = if (now <= currentDownTime) currentDownTime + 50L else now
+                        injectMotion(MotionEvent.ACTION_UP, currentDownTime, upTime, x, y)
                         isTouching = false
                     }
                 }
