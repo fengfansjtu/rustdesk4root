@@ -76,17 +76,15 @@ class MainService : Service() {
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
-        if (!powerManager.isInteractive) {
+        if (!powerManager.isInteractive || isLocked) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
-                safeAcquireWakeLock(5000)
+                safeAcquireWakeLock(10000)
                 if (RootInputManager.isRootAvailable()) {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
             }
-        }
-        if (isLocked) {
             checkAndStartLockscreenCaptureIfNeeded()
         }
 
@@ -110,17 +108,15 @@ class MainService : Service() {
     fun rustKeyEventInput(input: ByteArray) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
-        if (!powerManager.isInteractive) {
+        if (!powerManager.isInteractive || isLocked) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
-                safeAcquireWakeLock(5000)
+                safeAcquireWakeLock(10000)
                 if (RootInputManager.isRootAvailable()) {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
             }
-        }
-        if (isLocked) {
             checkAndStartLockscreenCaptureIfNeeded()
         }
         val mode = RootInputManager.getInputControlMode(this)
@@ -308,6 +304,14 @@ class MainService : Service() {
 
     private var lastRefreshPipelineTime = 0L
 
+    private val lockscreenWatchdogRunnable = object : Runnable {
+        override fun run() {
+            if (!isStart) return
+            checkAndStartLockscreenCaptureIfNeeded()
+            serviceHandler?.postDelayed(this, 1000L)
+        }
+    }
+
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -316,11 +320,18 @@ class MainService : Service() {
                     // Cancel any pending pipeline refresh when screen turns off.
                     // Never recreate ImageReader or surfaces while display is off!
                     serviceHandler?.removeCallbacks(refreshPipelineRunnable)
+                    if (isStart && RootInputManager.isRootAvailable()) {
+                        safeAcquireWakeLock(15000)
+                        RootInputManager.wakeAndDismissKeyguard()
+                        checkAndStartLockscreenCaptureIfNeeded()
+                        serviceHandler?.postDelayed({ checkAndStartLockscreenCaptureIfNeeded() }, 300L)
+                        serviceHandler?.postDelayed({ checkAndStartLockscreenCaptureIfNeeded() }, 1000L)
+                    }
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     Log.d(logTag, "Screen turned ON (ACTION_SCREEN_ON)")
                     checkAndStartLockscreenCaptureIfNeeded()
-                    if (isStart) {
+                    if (isStart && !isLockscreenCaptureActive) {
                         FFI.refreshScreen()
                     }
                 }
@@ -342,7 +353,7 @@ class MainService : Service() {
 
         override fun onResumed() {
             Log.d(logTag, "VirtualDisplay onResumed")
-            if (isStart && powerManager.isInteractive) {
+            if (isStart && powerManager.isInteractive && !isLockscreenCaptureActive) {
                 FFI.refreshScreen()
             }
         }
@@ -370,15 +381,28 @@ class MainService : Service() {
     private var isLockscreenCaptureActive = false
 
     fun checkAndStartLockscreenCaptureIfNeeded() {
-        if (!RootInputManager.isRootAvailable() || !isStart) {
+        if (!isStart) {
             stopLockscreenCapture()
             return
         }
+        if (!RootInputManager.isRootAvailable()) {
+            RootInputManager.checkRootAsync { available ->
+                if (available && isStart) {
+                    startLockscreenCaptureIfLocked()
+                }
+            }
+            return
+        }
+        startLockscreenCaptureIfLocked()
+    }
+
+    private fun startLockscreenCaptureIfLocked() {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
-        if (isLocked) {
-            if (!powerManager.isInteractive) {
-                safeAcquireWakeLock(5000)
+        val isInteractive = powerManager.isInteractive
+        if (isLocked || !isInteractive) {
+            if (!isInteractive) {
+                safeAcquireWakeLock(15000)
                 RootInputManager.wakeAndDismissKeyguard()
             }
             startLockscreenCapture()
@@ -394,19 +418,31 @@ class MainService : Service() {
             Log.i(logTag, "Lockscreen capture worker started.")
             var buffer: ByteBuffer? = null
             var lastCaptureTime = 0L
+            var lastWakeRenewTime = 0L
+            var frameCount = 0
+
+            safeAcquireWakeLock(15000)
+            RootInputManager.wakeAndDismissKeyguard()
+            lastWakeRenewTime = SystemClock.elapsedRealtime()
 
             while (isLockscreenCaptureActive && isStart) {
                 val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                if (keyguardManager?.isKeyguardLocked != true) {
+                val isLocked = keyguardManager?.isKeyguardLocked == true
+                val isInteractive = powerManager.isInteractive
+                if (!isLocked && isInteractive) {
                     break
-                }
-                if (!powerManager.isInteractive) {
-                    safeAcquireWakeLock(5000)
-                    RootInputManager.wakeAndDismissKeyguard()
-                    try { Thread.sleep(200) } catch (ignored: Exception) {}
                 }
 
                 val now = SystemClock.elapsedRealtime()
+                if (!isInteractive || now - lastWakeRenewTime > 3500L) {
+                    lastWakeRenewTime = now
+                    safeAcquireWakeLock(15000)
+                    if (!isInteractive) {
+                        RootInputManager.wakeAndDismissKeyguard()
+                        try { Thread.sleep(150) } catch (ignored: Exception) {}
+                    }
+                }
+
                 if (now - lastCaptureTime < 180) { // ~5-6 FPS, ideal for viewing lockscreen and entering credentials
                     try { Thread.sleep(30) } catch (ignored: Exception) {}
                     continue
@@ -436,6 +472,10 @@ class MainService : Service() {
                         buffer?.rewind()
                         scaled.recycle()
                         FFI.onVideoFrameUpdate(buffer!!)
+                        if (frameCount == 0 || frameCount % 5 == 0) {
+                            FFI.refreshScreen()
+                        }
+                        frameCount++
                     }
                 } catch (e: Exception) {
                     Log.w(logTag, "Lockscreen capture error: ${e.message}")
@@ -680,6 +720,11 @@ class MainService : Service() {
                             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                             image.use { img ->
                                 if (!isStart) return@use
+                                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                                if (keyguardManager?.isKeyguardLocked == true || !powerManager.isInteractive || isLockscreenCaptureActive) {
+                                    checkAndStartLockscreenCaptureIfNeeded()
+                                    if (isLockscreenCaptureActive) return@use
+                                }
                                 val planes = img.planes
                                 val buffer = planes[0].buffer
                                 buffer.rewind()
@@ -893,6 +938,9 @@ class MainService : Service() {
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
         acquireCpuWakeLock()
+        checkAndStartLockscreenCaptureIfNeeded()
+        serviceHandler?.removeCallbacks(lockscreenWatchdogRunnable)
+        serviceHandler?.postDelayed(lockscreenWatchdogRunnable, 1000L)
         return true
     }
 
@@ -912,6 +960,7 @@ class MainService : Service() {
     @Synchronized
     fun stopCapture() {
         Log.d(logTag, "Stop Capture")
+        serviceHandler?.removeCallbacks(lockscreenWatchdogRunnable)
         stopLockscreenCapture()
         captureRestartPending = false
         captureRestartInVoiceCall = false
