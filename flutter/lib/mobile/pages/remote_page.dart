@@ -546,6 +546,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             () => getRawPointerAndKeyBody(Overlay(
               initialEntries: [
                 OverlayEntry(builder: (context) {
+                  Provider.of<FfiModel>(context);
                   return Container(
                     color: kColorCanvas,
                     child: isWebDesktop
@@ -756,14 +757,16 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           if (showCursorPaint) {
             paints.add(CursorPaint(widget.id));
           }
-          if (gFFI.ffiModel.touchMode) {
-            paints.add(FloatingMouse(
-              ffi: gFFI,
-            ));
-          } else {
-            paints.add(FloatingMouseWidgets(
-              ffi: gFFI,
-            ));
+          if (!gFFI.ffiModel.isPeerAndroid) {
+            if (gFFI.ffiModel.touchMode) {
+              paints.add(FloatingMouse(
+                ffi: gFFI,
+              ));
+            } else {
+              paints.add(FloatingMouseWidgets(
+                ffi: gFFI,
+              ));
+            }
           }
           return paints;
         }()));
@@ -1233,6 +1236,9 @@ class CursorPaint extends StatelessWidget {
     final m = Provider.of<CursorModel>(context);
     final c = Provider.of<CanvasModel>(context);
     final ffiModel = Provider.of<FfiModel>(context);
+    if (ffiModel.isPeerAndroid) {
+      return Offstage();
+    }
     final s = c.scale;
     double hotx = m.hotx;
     double hoty = m.hoty;

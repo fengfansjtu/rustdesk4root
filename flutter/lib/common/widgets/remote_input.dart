@@ -363,6 +363,8 @@ class _RawTouchGestureDetectorRegionState
       if (lastTapDownDetails != null) {
         await ffi.cursorModel.move(lastTapDownDetails.localPosition.dx,
             lastTapDownDetails.localPosition.dy);
+      } else {
+        await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
       }
       if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
         return;

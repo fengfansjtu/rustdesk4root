@@ -76,7 +76,7 @@ class MainService : Service() {
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
-        if (!powerManager.isInteractive || isLocked) {
+        if (!powerManager.isInteractive) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
@@ -85,9 +85,9 @@ class MainService : Service() {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
             }
-            if (isLocked) {
-                checkAndStartLockscreenCaptureIfNeeded()
-            }
+        }
+        if (isLocked) {
+            checkAndStartLockscreenCaptureIfNeeded()
         }
 
         val mode = RootInputManager.getInputControlMode(this)
@@ -110,7 +110,7 @@ class MainService : Service() {
     fun rustKeyEventInput(input: ByteArray) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
-        if (!powerManager.isInteractive || isLocked) {
+        if (!powerManager.isInteractive) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastWakeOrDismissTime > 2000L) {
                 lastWakeOrDismissTime = now
@@ -119,9 +119,9 @@ class MainService : Service() {
                     RootInputManager.wakeAndDismissKeyguard()
                 }
             }
-            if (isLocked) {
-                checkAndStartLockscreenCaptureIfNeeded()
-            }
+        }
+        if (isLocked) {
+            checkAndStartLockscreenCaptureIfNeeded()
         }
         val mode = RootInputManager.getInputControlMode(this)
         if (mode == RootInputManager.MODE_ROOT) {

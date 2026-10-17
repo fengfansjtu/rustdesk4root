@@ -1462,6 +1462,10 @@ class CursorPaint extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = Provider.of<CursorModel>(context);
     final c = Provider.of<CanvasModel>(context);
+    final ffiModel = Provider.of<FfiModel>(context);
+    if (ffiModel.isPeerAndroid) {
+      return Offstage();
+    }
     double hotx = m.hotx;
     double hoty = m.hoty;
     if (m.image == null) {

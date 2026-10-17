@@ -32,6 +32,7 @@ object RootInputManager {
     private const val LEFT_DOWN = 9
     private const val LEFT_UP = 10
     private const val RIGHT_UP = 18
+    private const val WHEEL_BUTTON_DOWN = 33
     private const val WHEEL_BUTTON_UP = 34
     private const val BACK_UP = 66
     private const val WHEEL_DOWN = 523331
@@ -73,6 +74,7 @@ object RootInputManager {
     private var isPanDown = false
     private var wasServerMouseDownSent = false
     private var wasServerTouchDownSent = false
+    private var wheelButtonDownTime = 0L
 
     fun getInputControlMode(context: Context): String {
         val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
@@ -186,7 +188,7 @@ object RootInputManager {
             } catch (ignored: Throwable) {}
         }, "RootInputErrReader").apply { isDaemon = true; start() }
 
-        out.write("export CLASSPATH=\"$apkPath\"; if [ -x /system/bin/app_process ]; then exec /system/bin/app_process / $className; else exec app_process / $className; fi\n")
+        out.write("export CLASSPATH=\"$apkPath\"; if [ -x /system/bin/app_process64 ]; then exec /system/bin/app_process64 /system/bin $className; elif [ -x /system/bin/app_process ]; then exec /system/bin/app_process /system/bin $className; else exec app_process /system/bin $className; fi\n")
         out.flush()
 
         val readThread = Thread({
@@ -233,17 +235,16 @@ object RootInputManager {
 
     /**
      * Dispatch mouse input via root without AccessibilityService.
-     * Aligned with InputService.kt mask definitions.
+     * Aligned with InputService.kt mask definitions:
+     * NOTE: In RustDesk wire protocol, LEFT_DOWN (9) and LEFT_UP (10) ALWAYS send _x=0, _y=0!
+     * Coordinates are ONLY sent on mask == 0 or mask == LEFT_MOVE (8)!
      */
     fun onMouseInput(mask: Int, _x: Int, _y: Int) {
-        val x = toPhysicalX(_x)
-        val y = toPhysicalY(_y)
-
         // mask == 0: hover/move without left button pressed
         // mask == LEFT_MOVE (8): move while left button is held
         if (mask == 0 || mask == LEFT_MOVE) {
-            curX = x
-            curY = y
+            curX = toPhysicalX(_x)
+            curY = toPhysicalY(_y)
             // CRITICAL: Only send MOVE when left button is pressed (dragging)!
             // Moving mouse without left button NEVER injects events, completely eliminating system mouse cursors!
             if (leftButtonDown) {
@@ -255,10 +256,13 @@ object RootInputManager {
         }
 
         if (mask == LEFT_DOWN) {
-            downX = x
-            downY = y
-            curX = x
-            curY = y
+            // Only update curX/curY if non-zero coordinates were explicitly provided
+            if (_x > 0 || _y > 0) {
+                curX = toPhysicalX(_x)
+                curY = toPhysicalY(_y)
+            }
+            downX = curX
+            downY = curY
             downTime = SystemClock.uptimeMillis()
             leftButtonDown = true
             if (isServerReady) {
@@ -271,8 +275,11 @@ object RootInputManager {
         }
 
         if (mask == LEFT_UP) {
-            curX = x
-            curY = y
+            // Only update curX/curY if non-zero coordinates were explicitly provided
+            if (_x > 0 || _y > 0) {
+                curX = toPhysicalX(_x)
+                curY = toPhysicalY(_y)
+            }
             if (leftButtonDown) {
                 leftButtonDown = false
                 if (isServerReady && wasServerMouseDownSent) {
@@ -281,7 +288,7 @@ object RootInputManager {
                     return
                 }
                 wasServerMouseDownSent = false
-                // Fallback to direct root input if server is not ready or down event wasn't sent to server!
+                // Fallback to direct root input if server is not ready or down event wasn't sent to server
                 val duration = SystemClock.uptimeMillis() - downTime
                 val dist = kotlin.math.hypot((curX - downX).toDouble(), (curY - downY).toDouble())
                 if (dist < 25) {
@@ -298,7 +305,17 @@ object RootInputManager {
             return
         }
 
-        if (mask == RIGHT_UP || mask == BACK_UP) {
+        // Right click in InputService.kt performs longPress at (mouseX, mouseY)
+        if (mask == RIGHT_UP) {
+            if (isServerReady) {
+                enqueueCmd("S $curX $curY $curX $curY 550")
+            } else {
+                execRootCmd("input swipe $curX $curY $curX $curY 550")
+            }
+            return
+        }
+
+        if (mask == BACK_UP) {
             if (isServerReady) {
                 enqueueCmd("K 4") // KEYCODE_BACK
             } else {
@@ -307,31 +324,41 @@ object RootInputManager {
             return
         }
 
+        if (mask == WHEEL_BUTTON_DOWN) {
+            wheelButtonDownTime = SystemClock.uptimeMillis()
+            return
+        }
+
         if (mask == WHEEL_BUTTON_UP) {
+            val held = if (wheelButtonDownTime > 0L) SystemClock.uptimeMillis() - wheelButtonDownTime else 0L
+            wheelButtonDownTime = 0L
+            val keyCode = if (held >= 200L) 187 else 3 // 187 = KEYCODE_APP_SWITCH (Recents), 3 = KEYCODE_HOME
             if (isServerReady) {
-                enqueueCmd("K 3") // KEYCODE_HOME
+                enqueueCmd("K $keyCode")
             } else {
-                execRootCmd("input keyevent 3")
+                execRootCmd("input keyevent $keyCode")
             }
             return
         }
 
         if (mask == WHEEL_DOWN) {
-            val targetY = max(0, curY - 350)
+            if (curY < 120) return
+            val targetY = max(0, curY - 120)
             if (isServerReady) {
-                enqueueCmd("S $curX $curY $curX $targetY 100")
+                enqueueCmd("S $curX $curY $curX $targetY 60")
             } else {
-                execRootCmd("input swipe $curX $curY $curX $targetY 100")
+                execRootCmd("input swipe $curX $curY $curX $targetY 60")
             }
             return
         }
 
         if (mask == WHEEL_UP) {
-            val targetY = curY + 350
+            if (curY < 120) return
+            val targetY = curY + 120
             if (isServerReady) {
-                enqueueCmd("S $curX $curY $curX $targetY 100")
+                enqueueCmd("S $curX $curY $curX $targetY 60")
             } else {
-                execRootCmd("input swipe $curX $curY $curX $targetY 100")
+                execRootCmd("input swipe $curX $curY $curX $targetY 60")
             }
             return
         }
@@ -383,8 +410,10 @@ object RootInputManager {
                         }
                     }
                 }
-                curX = max(0, _x) * scale
-                curY = max(0, _y) * scale
+                if (_x > 0 || _y > 0) {
+                    curX = max(0, _x) * scale
+                    curY = max(0, _y) * scale
+                }
             }
         }
     }

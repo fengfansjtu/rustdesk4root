@@ -530,11 +530,9 @@ class ServerModel with ChangeNotifier {
         }
         break;
       case "input":
-        if (_inputOk != value) {
-          bind.mainSetOption(
-              key: kOptionEnableKeyboard,
-              value: value ? defaultOptionYes : 'N');
-        }
+        bind.mainSetOption(
+            key: kOptionEnableKeyboard,
+            value: value ? defaultOptionYes : 'N');
         _inputOk = value;
         break;
       default:

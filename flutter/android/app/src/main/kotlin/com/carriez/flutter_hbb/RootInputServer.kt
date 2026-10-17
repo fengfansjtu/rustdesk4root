@@ -23,10 +23,14 @@ object RootInputServer {
     private var inputManager: Any? = null
     private var injectInputEventMethod: Method? = null
     private var setDisplayIdMethod: Method? = null
+    private var touchDeviceId: Int = 0
 
     // Crucial: A single gesture sequence (DOWN -> MOVE... -> UP) MUST share the exact same downTime!
     private var currentDownTime: Long = 0L
     private var isTouching: Boolean = false
+    private var downX: Float = 0f
+    private var downY: Float = 0f
+    private var lastInjectOk: Boolean = true
 
     private const val INJECT_INPUT_EVENT_MODE_ASYNC = 0
 
@@ -50,9 +54,7 @@ object RootInputServer {
             initReflection()
 
             if (inputManager == null || injectInputEventMethod == null) {
-                System.err.println("RootInputServer: FATAL - could not find inputManager or injectInputEventMethod, exiting so daemon fallback engages.")
-                System.exit(1)
-                return
+                System.err.println("RootInputServer: could not find inputManager or injectInputEventMethod, will use shell input fallback in daemon.")
             }
 
             // Notify parent process via stdout that RootInputServer is ready
@@ -75,21 +77,41 @@ object RootInputServer {
     }
 
     private fun initReflection() {
-        // Strategy 1: InputManager.getInstance() (Android 7~13)
+        // Initialize ActivityThread system context workaround (Scrcpy Workarounds style) for Android 12-15
+        try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val currentAtMethod = atClass.getDeclaredMethod("currentActivityThread")
+            currentAtMethod.isAccessible = true
+            if (currentAtMethod.invoke(null) == null) {
+                val atCtor = atClass.getDeclaredConstructor()
+                atCtor.isAccessible = true
+                val at = atCtor.newInstance()
+                val sCurrentField = atClass.getDeclaredField("sCurrentActivityThread")
+                sCurrentField.isAccessible = true
+                sCurrentField.set(null, at)
+                try {
+                    val mSystemThread = atClass.getDeclaredField("mSystemThread")
+                    mSystemThread.isAccessible = true
+                    mSystemThread.setBoolean(at, true)
+                } catch (ignored: Throwable) {}
+            }
+        } catch (ignored: Throwable) {}
+
+        // Strategy 1: InputManagerGlobal.getInstance() (Android 14+)
         if (inputManager == null) {
             try {
-                val imClass = InputManager::class.java
-                val getInstance = imClass.getDeclaredMethod("getInstance")
+                val imgClass = Class.forName("android.hardware.input.InputManagerGlobal")
+                val getInstance = imgClass.getDeclaredMethod("getInstance")
                 getInstance.isAccessible = true
                 inputManager = getInstance.invoke(null)
             } catch (ignored: Throwable) {}
         }
 
-        // Strategy 2: InputManagerGlobal (Android 14+)
+        // Strategy 2: InputManager.getInstance() (Android 7~13)
         if (inputManager == null) {
             try {
-                val imgClass = Class.forName("android.hardware.input.InputManagerGlobal")
-                val getInstance = imgClass.getDeclaredMethod("getInstance")
+                val imClass = InputManager::class.java
+                val getInstance = imClass.getDeclaredMethod("getInstance")
                 getInstance.isAccessible = true
                 inputManager = getInstance.invoke(null)
             } catch (ignored: Throwable) {}
@@ -104,24 +126,6 @@ object RootInputServer {
                 val stubClass = Class.forName("android.hardware.input.IInputManager\$Stub")
                 val asInterface = stubClass.getMethod("asInterface", android.os.IBinder::class.java)
                 inputManager = asInterface.invoke(null, binder)
-            } catch (ignored: Throwable) {}
-        }
-
-        // Strategy 4: ActivityThread systemContext fallback
-        if (inputManager == null) {
-            try {
-                val atClass = Class.forName("android.app.ActivityThread")
-                val sm = atClass.getDeclaredMethod("systemMain")
-                sm.isAccessible = true
-                val at = sm.invoke(null)
-                if (at != null) {
-                    val getSysCtx = atClass.getDeclaredMethod("getSystemContext")
-                    getSysCtx.isAccessible = true
-                    val sysCtx = getSysCtx.invoke(at) as? android.content.Context
-                    if (sysCtx != null) {
-                        inputManager = sysCtx.getSystemService(android.content.Context.INPUT_SERVICE)
-                    }
-                }
             } catch (ignored: Throwable) {}
         }
 
@@ -165,6 +169,25 @@ object RootInputServer {
                 System.err.println("RootInputServer: setDisplayId method not found: ${e.message}")
             }
         }
+
+        touchDeviceId = getTouchDeviceId()
+        System.err.println("RootInputServer: resolved touchDeviceId=$touchDeviceId")
+    }
+
+    /**
+     * Matches AOSP InputShellCommand.getInputDeviceId(InputDevice.SOURCE_TOUCHSCREEN)
+     */
+    private fun getTouchDeviceId(): Int {
+        try {
+            val devIds = InputDevice.getDeviceIds()
+            for (devId in devIds) {
+                val inputDev = InputDevice.getDevice(devId)
+                if (inputDev != null && inputDev.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+                    return devId
+                }
+            }
+        } catch (ignored: Throwable) {}
+        return 0
     }
 
     private fun handleCommand(cmd: String) {
@@ -174,9 +197,11 @@ object RootInputServer {
                 "D" -> { // Down: D x y
                     val x = parts[1].toFloat()
                     val y = parts[2].toFloat()
+                    downX = x
+                    downY = y
                     currentDownTime = SystemClock.uptimeMillis()
                     isTouching = true
-                    injectMotion(MotionEvent.ACTION_DOWN, currentDownTime, currentDownTime, x, y)
+                    lastInjectOk = injectMotion(MotionEvent.ACTION_DOWN, currentDownTime, currentDownTime, x, y)
                 }
                 "M" -> { // Move: M x y
                     val x = parts[1].toFloat()
@@ -184,21 +209,42 @@ object RootInputServer {
                     val now = SystemClock.uptimeMillis()
                     // Defensive guard: if DOWN was missed, synthesize DOWN to establish a valid gesture sequence
                     if (!isTouching) {
+                        downX = x
+                        downY = y
                         currentDownTime = now
                         isTouching = true
-                        injectMotion(MotionEvent.ACTION_DOWN, currentDownTime, now, x, y)
-                    } else {
+                        lastInjectOk = injectMotion(MotionEvent.ACTION_DOWN, currentDownTime, now, x, y)
+                    } else if (lastInjectOk) {
                         injectMotion(MotionEvent.ACTION_MOVE, currentDownTime, now, x, y)
                     }
                 }
                 "U" -> { // Up: U x y
                     val x = parts[1].toFloat()
                     val y = parts[2].toFloat()
-                    val now = SystemClock.uptimeMillis()
                     if (isTouching) {
-                        val upTime = if (now <= currentDownTime) currentDownTime + 50L else now
-                        injectMotion(MotionEvent.ACTION_UP, currentDownTime, upTime, x, y)
                         isTouching = false
+                        var now = SystemClock.uptimeMillis()
+                        // When client sends tapDown + tapUp back-to-back within <15ms,
+                        // sleep briefly so eventTime is a genuine current uptimeMillis (never in the future!)
+                        val elapsed = now - currentDownTime
+                        if (elapsed < 15L) {
+                            try { Thread.sleep(15L - elapsed.coerceAtLeast(0L)) } catch (ignored: Throwable) {}
+                            now = SystemClock.uptimeMillis()
+                        }
+                        val ok = if (lastInjectOk) {
+                            injectMotion(MotionEvent.ACTION_UP, currentDownTime, now, x, y)
+                        } else {
+                            false
+                        }
+                        if (!ok) {
+                            val duration = (now - currentDownTime).coerceIn(50L, 600L)
+                            val dist = kotlin.math.hypot((x - downX).toDouble(), (y - downY).toDouble())
+                            if (dist < 25.0 && duration < 400L) {
+                                execInputFallback("input", "tap", downX.toInt().toString(), downY.toInt().toString())
+                            } else {
+                                execInputFallback("input", "swipe", downX.toInt().toString(), downY.toInt().toString(), x.toInt().toString(), y.toInt().toString(), duration.toString())
+                            }
+                        }
                     }
                 }
                 "S" -> { // Swipe: S x1 y1 x2 y2 durationMs
@@ -217,7 +263,7 @@ object RootInputServer {
                     val keyCode = parts[1].toInt()
                     injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN)
                 }
-                "KU" -> { // Key Up: KU keyCode
+                "KU" -> { // Key Up: KeyEvent.ACTION_UP
                     val keyCode = parts[1].toInt()
                     injectKeyEvent(keyCode, KeyEvent.ACTION_UP)
                 }
@@ -238,7 +284,17 @@ object RootInputServer {
         }
     }
 
-    private fun injectMotion(action: Int, downTime: Long, eventTime: Long, x: Float, y: Float) {
+    private fun execInputFallback(vararg args: String) {
+        try {
+            Runtime.getRuntime().exec(args)
+        } catch (t: Throwable) {
+            System.err.println("execInputFallback failed: ${t.message}")
+        }
+    }
+
+    private fun injectMotion(action: Int, downTime: Long, eventTime: Long, x: Float, y: Float): Boolean {
+        if (injectInputEventMethod == null || inputManager == null) return false
+
         pointerCoords[0].x = x
         pointerCoords[0].y = y
         pointerCoords[0].pressure = if (action == MotionEvent.ACTION_UP) 0f else 1.0f
@@ -255,7 +311,7 @@ object RootInputServer {
             0, // buttonState
             1.0f, // xPrecision
             1.0f, // yPrecision
-            0, // deviceId (0 = Virtual / System)
+            touchDeviceId, // resolved touchscreen deviceId
             0, // edgeFlags
             InputDevice.SOURCE_TOUCHSCREEN, // CRITICAL: Always declare as TOUCHSCREEN, NEVER MOUSE!
             0 // flags
@@ -267,18 +323,19 @@ object RootInputServer {
             }
         } catch (ignored: Throwable) {}
 
-        try {
-            if (injectInputEventMethod != null && inputManager != null) {
-                val paramCount = injectInputEventMethod!!.parameterTypes.size
-                when (paramCount) {
-                    1 -> injectInputEventMethod?.invoke(inputManager, event)
-                    2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                    3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
-                    else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                }
+        return try {
+            val paramCount = injectInputEventMethod!!.parameterTypes.size
+            val res = when (paramCount) {
+                1 -> injectInputEventMethod?.invoke(inputManager, event)
+                2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
+                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
+                else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
             }
+            (res as? Boolean) ?: true
         } catch (t: Throwable) {
-            System.err.println("injectMotion failed: ${t.message}")
+            val cause = t.cause ?: t
+            System.err.println("injectMotion failed: ${cause.javaClass.simpleName}: ${cause.message}")
+            false
         } finally {
             event.recycle()
         }
@@ -286,62 +343,32 @@ object RootInputServer {
 
     private fun injectSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Long) {
         val startTime = SystemClock.uptimeMillis()
-        injectMotion(MotionEvent.ACTION_DOWN, startTime, startTime, x1, y1)
+        if (!injectMotion(MotionEvent.ACTION_DOWN, startTime, startTime, x1, y1)) {
+            execInputFallback("input", "swipe", x1.toInt().toString(), y1.toInt().toString(), x2.toInt().toString(), y2.toInt().toString(), duration.toString())
+            return
+        }
         val steps = (duration / 16).toInt().coerceAtLeast(4)
         for (i in 1..steps) {
             try { Thread.sleep(duration / steps) } catch (ignored: Throwable) {}
             val progress = i.toFloat() / steps
             val cx = x1 + (x2 - x1) * progress
             val cy = y1 + (y2 - y1) * progress
-            val now = startTime + (duration * progress).toLong()
+            val now = SystemClock.uptimeMillis()
             injectMotion(MotionEvent.ACTION_MOVE, startTime, now, cx, cy)
         }
-        val endTime = startTime + duration
+        val endTime = SystemClock.uptimeMillis()
         injectMotion(MotionEvent.ACTION_UP, startTime, endTime, x2, y2)
     }
 
     private fun injectKeyClick(keyCode: Int) {
-        val now = SystemClock.uptimeMillis()
-        val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, 0,
-            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
-        val up = KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, 0,
-            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
-
-        try {
-            if (setDisplayIdMethod != null && setDisplayIdMethod!!.declaringClass.isAssignableFrom(down.javaClass)) {
-                setDisplayIdMethod!!.invoke(down, 0)
-                setDisplayIdMethod!!.invoke(up, 0)
-            }
-        } catch (ignored: Throwable) {}
-
-        try {
-            if (injectInputEventMethod != null && inputManager != null) {
-                val paramCount = injectInputEventMethod!!.parameterTypes.size
-                when (paramCount) {
-                    1 -> {
-                        injectInputEventMethod?.invoke(inputManager, down)
-                        injectInputEventMethod?.invoke(inputManager, up)
-                    }
-                    2 -> {
-                        injectInputEventMethod?.invoke(inputManager, down, INJECT_INPUT_EVENT_MODE_ASYNC)
-                        injectInputEventMethod?.invoke(inputManager, up, INJECT_INPUT_EVENT_MODE_ASYNC)
-                    }
-                    3 -> {
-                        injectInputEventMethod?.invoke(inputManager, down, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
-                        injectInputEventMethod?.invoke(inputManager, up, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
-                    }
-                    else -> {
-                        injectInputEventMethod?.invoke(inputManager, down, INJECT_INPUT_EVENT_MODE_ASYNC)
-                        injectInputEventMethod?.invoke(inputManager, up, INJECT_INPUT_EVENT_MODE_ASYNC)
-                    }
-                }
-            }
-        } catch (t: Throwable) {
-            System.err.println("injectKeyClick failed: ${t.message}")
+        if (!injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN) || !injectKeyEvent(keyCode, KeyEvent.ACTION_UP)) {
+            execInputFallback("input", "keyevent", keyCode.toString())
         }
     }
 
-    private fun injectKeyEvent(keyCode: Int, action: Int) {
+    private fun injectKeyEvent(keyCode: Int, action: Int): Boolean {
+        if (injectInputEventMethod == null || inputManager == null) return false
+
         val now = SystemClock.uptimeMillis()
         val event = KeyEvent(now, now, action, keyCode, 0, 0,
             KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
@@ -352,18 +379,18 @@ object RootInputServer {
             }
         } catch (ignored: Throwable) {}
 
-        try {
-            if (injectInputEventMethod != null && inputManager != null) {
-                val paramCount = injectInputEventMethod!!.parameterTypes.size
-                when (paramCount) {
-                    1 -> injectInputEventMethod?.invoke(inputManager, event)
-                    2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                    3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
-                    else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                }
+        return try {
+            val paramCount = injectInputEventMethod!!.parameterTypes.size
+            val res = when (paramCount) {
+                1 -> injectInputEventMethod?.invoke(inputManager, event)
+                2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
+                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
+                else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
             }
+            (res as? Boolean) ?: true
         } catch (t: Throwable) {
             System.err.println("injectKeyEvent failed: ${t.message}")
+            false
         }
     }
 }

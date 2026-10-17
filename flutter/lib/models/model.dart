@@ -1853,9 +1853,9 @@ class VirtualMouseMode with ChangeNotifier {
   double _virtualMouseScale = 1.0;
   bool _showVirtualJoystick = false;
 
-  bool get showVirtualMouse => _showVirtualMouse;
+  bool get showVirtualMouse => _shouldShow() && _showVirtualMouse;
   double get virtualMouseScale => _virtualMouseScale;
-  bool get showVirtualJoystick => _showVirtualJoystick;
+  bool get showVirtualJoystick => _shouldShow() && _showVirtualJoystick;
 
   FfiModel ffiModel;
 
@@ -1867,6 +1867,9 @@ class VirtualMouseMode with ChangeNotifier {
     if (b == _showVirtualMouse) return;
     if (_shouldShow()) {
       _showVirtualMouse = b;
+      notifyListeners();
+    } else if (_showVirtualMouse) {
+      _showVirtualMouse = false;
       notifyListeners();
     }
   }
@@ -1884,10 +1887,19 @@ class VirtualMouseMode with ChangeNotifier {
     if (_shouldShow()) {
       _showVirtualJoystick = b;
       notifyListeners();
+    } else if (_showVirtualJoystick) {
+      _showVirtualJoystick = false;
+      notifyListeners();
     }
   }
 
   void loadOptions() {
+    if (!_shouldShow()) {
+      _showVirtualMouse = false;
+      _showVirtualJoystick = false;
+      notifyListeners();
+      return;
+    }
     _showVirtualMouse =
         bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y';
     _virtualMouseScale = double.tryParse(
