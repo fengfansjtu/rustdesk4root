@@ -100,14 +100,21 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
+        val mode = RootInputManager.getInputControlMode(activity)
         RootInputManager.checkRootAsync { isRoot ->
             if (isRoot) {
                 RootInputManager.protectProcessAndWhitelist(activity)
-                if (!RootInputManager.userDisabled && !InputService.isOpen) {
+                if (mode == RootInputManager.MODE_ROOT) {
+                    RootInputManager.startServer(applicationContext)
+                } else if (!RootInputManager.userDisabled && !InputService.isOpen) {
                     RootInputManager.enableAccessibilitySilently(activity)
                 }
             }
-            val inputPer = InputService.isOpen || (isRoot && !RootInputManager.userDisabled)
+            val inputPer = if (mode == RootInputManager.MODE_ROOT) {
+                isRoot && !RootInputManager.userDisabled
+            } else {
+                InputService.isOpen
+            }
             activity.runOnUiThread {
                 flutterMethodChannel?.invokeMethod(
                     "on_state_changed",
@@ -344,11 +351,12 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "set_input_mode" -> {
-                    val mode = call.arguments as? String ?: RootInputManager.MODE_ACCESSIBILITY
+                    val mode = call.arguments as? String ?: RootInputManager.MODE_ROOT
                     RootInputManager.setInputControlMode(context, mode)
                     if (mode == RootInputManager.MODE_ROOT) {
                         RootInputManager.userDisabled = false
                         RootInputManager.checkRootAsync { isRoot ->
+                            if (isRoot) RootInputManager.startServer(applicationContext)
                             runOnUiThread {
                                 Companion.flutterMethodChannel?.invokeMethod(
                                     "on_state_changed",
@@ -414,6 +422,7 @@ class MainActivity : FlutterActivity() {
                     val mode = RootInputManager.getInputControlMode(context)
                     if (mode == RootInputManager.MODE_ROOT) {
                         RootInputManager.userDisabled = true
+                        RootInputManager.destroy()
                     } else {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                             InputService.ctx?.disableSelf()

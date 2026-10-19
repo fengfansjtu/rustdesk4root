@@ -133,9 +133,11 @@ object RootInputServer {
         if (inputManager != null) {
             var curr: Class<*>? = inputManager!!.javaClass
             while (curr != null && curr != Any::class.java) {
-                for (m in curr.declaredMethods) {
+                for (m in curr.declaredMethods.sortedBy { it.parameterTypes.size }) {
                     if (m.name == "injectInputEvent" && m.parameterTypes.isNotEmpty() &&
-                        InputEvent::class.java.isAssignableFrom(m.parameterTypes[0])) {
+                        m.parameterTypes[0] == InputEvent::class.java &&
+                        m.parameterTypes.size in 2..3 &&
+                        m.parameterTypes.drop(1).all { it == Int::class.javaPrimitiveType }) {
                         m.isAccessible = true
                         injectInputEventMethod = m
                         break
@@ -207,14 +209,7 @@ object RootInputServer {
                     val x = parts[1].toFloat()
                     val y = parts[2].toFloat()
                     val now = SystemClock.uptimeMillis()
-                    // Defensive guard: if DOWN was missed, synthesize DOWN to establish a valid gesture sequence
-                    if (!isTouching) {
-                        downX = x
-                        downY = y
-                        currentDownTime = now
-                        isTouching = true
-                        lastInjectOk = injectMotion(MotionEvent.ACTION_DOWN, currentDownTime, now, x, y)
-                    } else if (lastInjectOk) {
+                    if (isTouching && lastInjectOk) {
                         injectMotion(MotionEvent.ACTION_MOVE, currentDownTime, now, x, y)
                     }
                 }
@@ -257,15 +252,17 @@ object RootInputServer {
                 }
                 "K" -> { // Key Click: K keyCode
                     val keyCode = parts[1].toInt()
-                    injectKeyClick(keyCode)
+                    injectKeyClick(keyCode, parts.getOrNull(2)?.toIntOrNull() ?: 0)
                 }
                 "KD" -> { // Key Down: KD keyCode
                     val keyCode = parts[1].toInt()
-                    injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN)
+                    if (!injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN, parts.getOrNull(2)?.toIntOrNull() ?: 0)) {
+                        execInputFallback("input", "keyevent", keyCode.toString())
+                    }
                 }
                 "KU" -> { // Key Up: KeyEvent.ACTION_UP
                     val keyCode = parts[1].toInt()
-                    injectKeyEvent(keyCode, KeyEvent.ACTION_UP)
+                    injectKeyEvent(keyCode, KeyEvent.ACTION_UP, parts.getOrNull(2)?.toIntOrNull() ?: 0)
                 }
                 "W" -> { // Wake & Unlock
                     injectKeyClick(KeyEvent.KEYCODE_WAKEUP) // 224
@@ -328,7 +325,7 @@ object RootInputServer {
             val res = when (paramCount) {
                 1 -> injectInputEventMethod?.invoke(inputManager, event)
                 2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
+                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, -1)
                 else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
             }
             (res as? Boolean) ?: true
@@ -360,17 +357,19 @@ object RootInputServer {
         injectMotion(MotionEvent.ACTION_UP, startTime, endTime, x2, y2)
     }
 
-    private fun injectKeyClick(keyCode: Int) {
-        if (!injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN) || !injectKeyEvent(keyCode, KeyEvent.ACTION_UP)) {
+    private fun injectKeyClick(keyCode: Int, metaState: Int = 0) {
+        val downOk = injectKeyEvent(keyCode, KeyEvent.ACTION_DOWN, metaState)
+        val upOk = injectKeyEvent(keyCode, KeyEvent.ACTION_UP, metaState)
+        if (!downOk || !upOk) {
             execInputFallback("input", "keyevent", keyCode.toString())
         }
     }
 
-    private fun injectKeyEvent(keyCode: Int, action: Int): Boolean {
+    private fun injectKeyEvent(keyCode: Int, action: Int, metaState: Int = 0): Boolean {
         if (injectInputEventMethod == null || inputManager == null) return false
 
         val now = SystemClock.uptimeMillis()
-        val event = KeyEvent(now, now, action, keyCode, 0, 0,
+        val event = KeyEvent(now, now, action, keyCode, 0, metaState,
             KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
 
         try {
@@ -384,7 +383,7 @@ object RootInputServer {
             val res = when (paramCount) {
                 1 -> injectInputEventMethod?.invoke(inputManager, event)
                 2 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, 0)
+                3 -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC, -1)
                 else -> injectInputEventMethod?.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC)
             }
             (res as? Boolean) ?: true

@@ -74,6 +74,8 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
+        if (RootInputManager.getInputControlMode(this) == RootInputManager.MODE_ROOT &&
+            !RootInputManager.isRootAvailable()) return
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
         if (!powerManager.isInteractive || isLocked) {
@@ -106,6 +108,8 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustKeyEventInput(input: ByteArray) {
+        if (RootInputManager.getInputControlMode(this) == RootInputManager.MODE_ROOT &&
+            !RootInputManager.isRootAvailable()) return
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
         if (!powerManager.isInteractive || isLocked) {

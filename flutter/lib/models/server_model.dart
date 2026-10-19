@@ -58,12 +58,12 @@ class ServerModel with ChangeNotifier {
 
   bool get inputOk => _inputOk;
 
-  String _inputControlMode = kInputControlModeAccessibility;
+  String _inputControlMode = kInputControlModeRoot;
   String get inputControlMode => _inputControlMode;
 
   Future<void> initInputControlMode() async {
     final saved = bind.mainGetLocalOption(key: kOptionInputControlMode);
-    _inputControlMode = saved.isNotEmpty ? saved : kInputControlModeAccessibility;
+    _inputControlMode = saved.isNotEmpty ? saved : kInputControlModeRoot;
     if (isAndroid) {
       try {
         await parent.target?.invokeMethod("set_input_mode", _inputControlMode);
@@ -397,8 +397,9 @@ class ServerModel with ChangeNotifier {
           } catch (e) {
             debugPrint("request_root_input error: $e");
           }
+          showToast(translate("No permission"));
+          return;
         }
-        /// For original accessibility mode (or root fallback), open accessibility settings
         showInputWarnAlert(parent.target!);
       }
     }

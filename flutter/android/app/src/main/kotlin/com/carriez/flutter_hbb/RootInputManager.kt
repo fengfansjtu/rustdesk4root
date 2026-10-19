@@ -14,6 +14,7 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 /**
@@ -55,6 +56,7 @@ object RootInputManager {
     private var isServerReady = false
     private var serverProcess: Process? = null
     private var serverWriter: BufferedWriter? = null
+    private var workerThread: Thread? = null
 
     // Command queue prevents dropping the initial ACTION_DOWN while server starts up
     private val cmdQueue = LinkedBlockingQueue<String>(500)
@@ -78,7 +80,7 @@ object RootInputManager {
 
     fun getInputControlMode(context: Context): String {
         val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, Context.MODE_PRIVATE)
-        return prefs.getString("input_control_mode", MODE_ACCESSIBILITY) ?: MODE_ACCESSIBILITY
+        return prefs.getString("input_control_mode", MODE_ROOT) ?: MODE_ROOT
     }
 
     fun setInputControlMode(context: Context, mode: String) {
@@ -87,6 +89,8 @@ object RootInputManager {
         Log.i(TAG, "Input control mode set to: $mode")
         if (mode == MODE_ROOT && isRootAvailable()) {
             startServer(context)
+        } else if (mode != MODE_ROOT) {
+            destroy()
         }
     }
 
@@ -113,7 +117,7 @@ object RootInputManager {
         executor.execute {
             val available = checkSu()
             rootAvailable = available
-            callback(available)
+            callback(available && !userDisabled)
         }
     }
 
@@ -125,13 +129,13 @@ object RootInputManager {
             userDisabled = false
             val available = checkSu()
             rootAvailable = available
-            if (available) {
+            if (available && !userDisabled) {
                 grantMediaProjectionPermission(context)
                 wakeAndDismissKeyguard()
                 protectProcessAndWhitelist(context)
                 startServer(context)
             }
-            callback(available)
+            callback(available && !userDisabled)
         }
     }
 
@@ -140,31 +144,47 @@ object RootInputManager {
      */
     @Synchronized
     fun startServer(context: Context) {
-        if (isWorkerRunning) return
+        if (!isRootAvailable() || getInputControlMode(context) != MODE_ROOT) return
+        if (workerThread?.isAlive == true) return
         isWorkerRunning = true
 
-        Thread({
+        workerThread = Thread({
             while (isWorkerRunning) {
                 try {
                     launchServerProcess(context)
                     // Consume touch & key commands from queue and stream to app_process stdin pipe (<0.1ms latency)
                     while (isWorkerRunning && isServerReady && serverWriter != null) {
-                        val cmd = cmdQueue.take()
+                        val cmd = cmdQueue.poll(250, TimeUnit.MILLISECONDS)
+                        if (!isProcAlive(serverProcess)) {
+                            throw java.io.IOException("Root input process exited")
+                        }
+                        if (cmd == null) continue
                         serverWriter?.write(cmd)
                         serverWriter?.newLine()
                         serverWriter?.flush()
                     }
-                } catch (e: Throwable) {
-                    Log.e(TAG, "RootInputServer disconnected, restarting in 1s...", e)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                } catch (e: Exception) {
+                    if (isWorkerRunning) Log.e(TAG, "RootInputServer disconnected, restarting in 1s...", e)
+                } finally {
                     isServerReady = false
-                    try { serverWriter?.close() } catch (ignored: Throwable) {}
                     try { serverProcess?.destroy() } catch (ignored: Throwable) {}
+                    try { serverWriter?.close() } catch (ignored: Throwable) {}
                     serverWriter = null
                     serverProcess = null
-                    try { Thread.sleep(1000) } catch (ignored: Throwable) {}
+                    cmdQueue.clear()
+                }
+                if (isWorkerRunning) {
+                    try { Thread.sleep(1000) } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
                 }
             }
-        }, "RootInputWorker").apply { isDaemon = true; start() }
+        }, "RootInputWorker").apply { isDaemon = true }
+        workerThread?.start()
     }
 
     private fun launchServerProcess(context: Context) {
@@ -196,7 +216,7 @@ object RootInputManager {
                 var line: String?
                 while (inp.readLine().also { line = it } != null) {
                     Log.d(TAG, "[Server-OUT] $line")
-                    if (line!!.contains("RUSTDESK_ROOT_SERVER_READY")) {
+                    if (line == "RUSTDESK_ROOT_SERVER_READY" && isWorkerRunning && serverProcess === proc) {
                         serverWriter = out
                         isServerReady = true
                         Log.i(TAG, "RootInputServer is READY via high-speed anonymous pipe!")
@@ -240,6 +260,7 @@ object RootInputManager {
      * Coordinates are ONLY sent on mask == 0 or mask == LEFT_MOVE (8)!
      */
     fun onMouseInput(mask: Int, _x: Int, _y: Int) {
+        if (!isRootAvailable()) return
         // mask == 0: hover/move without left button pressed
         // mask == LEFT_MOVE (8): move while left button is held
         if (mask == 0 || mask == LEFT_MOVE) {
@@ -248,7 +269,7 @@ object RootInputManager {
             // CRITICAL: Only send MOVE when left button is pressed (dragging)!
             // Moving mouse without left button NEVER injects events, completely eliminating system mouse cursors!
             if (leftButtonDown) {
-                if (isServerReady) {
+                if (isServerReady && wasServerMouseDownSent) {
                     enqueueCmd("M $curX $curY")
                 }
             }
@@ -369,6 +390,7 @@ object RootInputManager {
      * Aligned with InputService.kt mask definitions.
      */
     fun onTouchInput(mask: Int, _x: Int, _y: Int) {
+        if (!isRootAvailable()) return
         val scale = getScale()
         when (mask) {
             TOUCH_PAN_START -> {
@@ -423,6 +445,7 @@ object RootInputManager {
      */
     @RequiresApi(Build.VERSION_CODES.N)
     fun onKeyEvent(data: ByteArray) {
+        if (!isRootAvailable()) return
         try {
             val keyEvent = KeyEvent.parseFrom(data)
             val keyboardMode = keyEvent.mode
@@ -448,13 +471,15 @@ object RootInputManager {
             val androidKeyEvent = KeyEventConverter.toAndroidKeyEvent(keyEvent)
             if (androidKeyEvent != null) {
                 if (isServerReady) {
-                    if (keyEvent.down) {
-                        enqueueCmd("KD ${androidKeyEvent.keyCode}")
+                    if (keyEvent.press) {
+                        enqueueCmd("K ${androidKeyEvent.keyCode} ${androidKeyEvent.metaState}")
+                    } else if (keyEvent.down) {
+                        enqueueCmd("KD ${androidKeyEvent.keyCode} ${androidKeyEvent.metaState}")
                     } else {
-                        enqueueCmd("KU ${androidKeyEvent.keyCode}")
+                        enqueueCmd("KU ${androidKeyEvent.keyCode} ${androidKeyEvent.metaState}")
                     }
                 } else {
-                    if (keyEvent.down) {
+                    if (keyEvent.down || keyEvent.press) {
                         execRootCmd("input keyevent ${androidKeyEvent.keyCode}")
                     }
                 }
@@ -468,8 +493,12 @@ object RootInputManager {
      * Wake screen and dismiss lockscreen keyguard if possible.
      */
     fun wakeAndDismissKeyguard() {
-        enqueueCmd("W")
-        execRootCmd("input keyevent 224; input keyevent 82; wm dismiss-keyguard")
+        if (!isRootAvailable()) return
+        if (isServerReady) {
+            enqueueCmd("W")
+        } else {
+            execRootCmd("input keyevent 224; input keyevent 82; wm dismiss-keyguard")
+        }
     }
 
     /**
@@ -478,12 +507,19 @@ object RootInputManager {
     private fun checkSu(): Boolean {
         var process: Process? = null
         return try {
-            process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val line = reader.readLine()
-            val isRoot = line?.contains("uid=0") == true
-            process.waitFor()
-            isRoot
+            process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+            val deadline = SystemClock.uptimeMillis() + 30_000L
+            while (isProcAlive(process)) {
+                if (SystemClock.uptimeMillis() >= deadline) {
+                    Log.w(TAG, "Root authorization timed out")
+                    return false
+                }
+                Thread.sleep(50)
+            }
+            val isRoot = process.inputStream.bufferedReader().use { reader ->
+                reader.lineSequence().any { it.startsWith("uid=0(") }
+            }
+            process.exitValue() == 0 && isRoot
         } catch (e: Exception) {
             false
         } finally {
@@ -542,6 +578,7 @@ object RootInputManager {
      */
     fun execRootCmd(cmd: String) {
         executor.execute {
+            if (userDisabled) return@execute
             try {
                 val writer = getShellWriter()
                 if (writer != null) {
@@ -683,15 +720,23 @@ EOF
     /**
      * Release su and server resources when service destroyed.
      */
+    @Synchronized
     fun destroy() {
-        enqueueCmd("EXIT")
         isWorkerRunning = false
+        isServerReady = false
+        workerThread?.interrupt()
+        cmdQueue.clear()
+        leftButtonDown = false
+        isPanDown = false
+        wasServerMouseDownSent = false
+        wasServerTouchDownSent = false
+        wheelButtonDownTime = 0L
 
         try {
-            serverWriter?.close()
+            serverProcess?.destroy()
         } catch (ignored: Exception) {}
         try {
-            serverProcess?.destroy()
+            serverWriter?.close()
         } catch (ignored: Exception) {}
         serverWriter = null
         serverProcess = null
