@@ -599,6 +599,7 @@ object RootInputManager {
                     }.apply { isDaemon = true; start() }
                 }
             } catch (e: Exception) {
+                if (userDisabled) return@execute
                 Log.e(TAG, "Error executing root command via persistent shell: $cmd, retrying one-shot su", e)
                 try {
                     suProcess?.destroy()

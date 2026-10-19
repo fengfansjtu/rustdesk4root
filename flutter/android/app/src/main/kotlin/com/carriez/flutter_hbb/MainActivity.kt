@@ -104,9 +104,7 @@ class MainActivity : FlutterActivity() {
         RootInputManager.checkRootAsync { isRoot ->
             if (isRoot) {
                 RootInputManager.protectProcessAndWhitelist(activity)
-                if (mode == RootInputManager.MODE_ROOT) {
-                    RootInputManager.startServer(applicationContext)
-                } else if (!RootInputManager.userDisabled && !InputService.isOpen) {
+                if (mode == RootInputManager.MODE_ACCESSIBILITY && !RootInputManager.userDisabled && !InputService.isOpen) {
                     RootInputManager.enableAccessibilitySilently(activity)
                 }
             }
