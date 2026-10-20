@@ -238,7 +238,7 @@ object RootInputManager {
 
     private fun enqueueCmd(cmd: String) {
         if (!cmdQueue.offer(cmd)) {
-            Log.w(TAG, "Root input queue overloaded; cancelling the active gesture")
+            Log.v(TAG, "Root input queue overloaded; cancelling the active gesture")
             cmdQueue.cancel()
         }
     }
