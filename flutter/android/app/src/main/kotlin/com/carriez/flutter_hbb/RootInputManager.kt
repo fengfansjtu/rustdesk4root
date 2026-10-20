@@ -13,7 +13,6 @@ import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
@@ -58,8 +57,7 @@ object RootInputManager {
     private var serverWriter: BufferedWriter? = null
     private var workerThread: Thread? = null
 
-    // Command queue prevents dropping the initial ACTION_DOWN while server starts up
-    private val cmdQueue = LinkedBlockingQueue<String>(500)
+    private val cmdQueue = RootInputQueue()
 
     // Shell management for system root commands
     private var suProcess: Process? = null
@@ -240,8 +238,8 @@ object RootInputManager {
 
     private fun enqueueCmd(cmd: String) {
         if (!cmdQueue.offer(cmd)) {
-            cmdQueue.poll() // Discard oldest command if queue is full to preserve real-time responsiveness
-            cmdQueue.offer(cmd)
+            Log.w(TAG, "Root input queue overloaded; cancelling the active gesture")
+            cmdQueue.cancel()
         }
     }
 

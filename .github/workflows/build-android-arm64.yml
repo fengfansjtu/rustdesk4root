@@ -180,6 +180,12 @@ jobs:
           popd
         shell: bash
 
+      - name: Test root input queue
+        working-directory: flutter/android
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: ./gradlew :app:testReleaseUnitTest --tests com.carriez.flutter_hbb.RootInputQueueTest
+
       - name: Prepare APK for Artifact and Release
         run: |
           mkdir -p release-pkg

@@ -43,6 +43,30 @@ Root authorization still requires approval in the device's root manager.
    on a fresh launch and verify the app reports failure without enabling or opening
    accessibility.
 
+## Touch responsiveness fixes
+
+The phone controller can send an early mouse down from `onLongPressDown`, followed
+by another down when a tap or pan wins gesture recognition. The daemon now cancels
+an outstanding injected touch before accepting a replacement down, so Android sees
+valid gesture boundaries rather than overlapping downs.
+
+The old queue discarded its oldest entry when full, including down/up commands.
+The root queue now combines consecutive absolute moves, removes only a queued move
+when space is needed, and reports control-only overflow instead of silently losing
+a release. Overflow explicitly cancels the touch. Buffered daemon moves are also
+combined without crossing a down/up/key boundary.
+
+Synthetic scroll/long-press swipes no longer overlap a live finger, and skip their
+remaining artificial delays when another command is waiting. The daemon removes
+the extra 15 ms sleep before up; AOSP's own `input tap` uses matching down/up times.
+Shell fallback gestures run serially so their separate processes cannot interleave
+touch sequences.
+
+For phone-to-Android-16 testing, repeat quick taps, rapid tap/swipe alternation,
+continuous drags, and a deliberate hold followed by a drag. Check both idle input
+and input immediately after scrolling. The three JVM queue regression tests run in
+the ARM64 workflow; real-device gesture recognition still needs verification.
+
 ## Known limits
 
 - Compilation does not verify OEM root policies or event injection on real devices.
@@ -51,8 +75,11 @@ Root authorization still requires approval in the device's root manager.
 - Screen capture still uses the existing MediaProjection and lock-screen capture
   code. Root input permission does not itself guarantee capture of secure surfaces
   or remove credential requirements on a secure lock screen.
-- The existing bounded input queue can discard commands when overloaded. An active
-  gesture or held key is not restored across a daemon failure.
+- Control-only queue overload cancels the touch rather than replaying a partial
+  gesture. An active gesture or held key is not restored across a daemon failure.
+- The wire input does not carry the phone's raw finger timestamps or gesture-cancel
+  events. Delays or missing releases introduced by the controlling client's gesture
+  recognizers cannot always be reconstructed by the receiver.
 - The existing module installer queues its shell commands asynchronously; its UI
   success result is not confirmation that the module was installed successfully.
 
@@ -63,7 +90,10 @@ Root authorization still requires approval in the device's root manager.
 - `RootInputManager.kt`: root defaults, authorization, worker/shell lifecycle, and
   root event dispatch.
 - `RootInputServer.kt`: root-only injection overload selection and event handling.
+- `RootInputQueue.kt`: root-only command buffering and move coalescing.
 - `server_model.dart`: new-install default and root authorization failure UI.
+- `app/build.gradle` and `build-android-arm64.yml`: JVM queue tests before artifact
+  upload, with JUnit confined to the test configuration.
 
 The explicit accessibility event dispatch implementation, Rust protocol, capture
 implementation, generated bridges, and submodules are unchanged.

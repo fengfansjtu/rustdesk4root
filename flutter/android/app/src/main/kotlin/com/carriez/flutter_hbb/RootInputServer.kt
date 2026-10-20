@@ -64,15 +64,26 @@ object RootInputServer {
             val reader = BufferedReader(InputStreamReader(System.`in`))
             var line: String?
             while (reader.readLine().also { line = it } != null) {
-                val cmd = line!!.trim()
+                var cmd = line!!.trim()
+                while (cmd.startsWith("M ") && reader.ready()) {
+                    reader.mark(128)
+                    val next = reader.readLine() ?: break
+                    if (!next.startsWith("M ")) {
+                        reader.reset()
+                        break
+                    }
+                    cmd = next
+                }
                 if (cmd.isEmpty()) continue
                 if (cmd == "EXIT" || cmd == "Q") break
-                handleCommand(cmd)
+                handleCommand(cmd, reader)
             }
         } catch (e: Throwable) {
             System.err.println("RootInputServer fatal error: ${e.message}")
             e.printStackTrace(System.err)
             System.exit(1)
+        } finally {
+            cancelTouch()
         }
     }
 
@@ -192,11 +203,12 @@ object RootInputServer {
         return 0
     }
 
-    private fun handleCommand(cmd: String) {
+    private fun handleCommand(cmd: String, reader: BufferedReader) {
         try {
             val parts = cmd.split(" ")
             when (parts[0]) {
                 "D" -> { // Down: D x y
+                    cancelTouch()
                     val x = parts[1].toFloat()
                     val y = parts[2].toFloat()
                     downX = x
@@ -218,20 +230,16 @@ object RootInputServer {
                     val y = parts[2].toFloat()
                     if (isTouching) {
                         isTouching = false
-                        var now = SystemClock.uptimeMillis()
-                        // When client sends tapDown + tapUp back-to-back within <15ms,
-                        // sleep briefly so eventTime is a genuine current uptimeMillis (never in the future!)
-                        val elapsed = now - currentDownTime
-                        if (elapsed < 15L) {
-                            try { Thread.sleep(15L - elapsed.coerceAtLeast(0L)) } catch (ignored: Throwable) {}
-                            now = SystemClock.uptimeMillis()
-                        }
+                        val now = SystemClock.uptimeMillis()
                         val ok = if (lastInjectOk) {
                             injectMotion(MotionEvent.ACTION_UP, currentDownTime, now, x, y)
                         } else {
                             false
                         }
                         if (!ok) {
+                            if (lastInjectOk) {
+                                injectMotion(MotionEvent.ACTION_CANCEL, currentDownTime, now, x, y)
+                            }
                             val duration = (now - currentDownTime).coerceIn(50L, 600L)
                             val dist = kotlin.math.hypot((x - downX).toDouble(), (y - downY).toDouble())
                             if (dist < 25.0 && duration < 400L) {
@@ -243,13 +251,15 @@ object RootInputServer {
                     }
                 }
                 "S" -> { // Swipe: S x1 y1 x2 y2 durationMs
+                    if (isTouching) return
                     val x1 = parts[1].toFloat()
                     val y1 = parts[2].toFloat()
                     val x2 = parts[3].toFloat()
                     val y2 = parts[4].toFloat()
                     val duration = parts.getOrNull(5)?.toLongOrNull() ?: 150L
-                    injectSwipe(x1, y1, x2, y2, duration)
+                    injectSwipe(x1, y1, x2, y2, duration, reader)
                 }
+                "C" -> cancelTouch()
                 "K" -> { // Key Click: K keyCode
                     val keyCode = parts[1].toInt()
                     injectKeyClick(keyCode, parts.getOrNull(2)?.toIntOrNull() ?: 0)
@@ -283,7 +293,12 @@ object RootInputServer {
 
     private fun execInputFallback(vararg args: String) {
         try {
-            Runtime.getRuntime().exec(args)
+            val process = ProcessBuilder(*args).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            val exitCode = process.waitFor()
+            if (exitCode != 0) {
+                System.err.println("Root input fallback exited with $exitCode: $output")
+            }
         } catch (t: Throwable) {
             System.err.println("execInputFallback failed: ${t.message}")
         }
@@ -294,7 +309,7 @@ object RootInputServer {
 
         pointerCoords[0].x = x
         pointerCoords[0].y = y
-        pointerCoords[0].pressure = if (action == MotionEvent.ACTION_UP) 0f else 1.0f
+        pointerCoords[0].pressure = if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) 0f else 1.0f
         pointerCoords[0].size = 1.0f
 
         val event = MotionEvent.obtain(
@@ -338,7 +353,16 @@ object RootInputServer {
         }
     }
 
-    private fun injectSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Long) {
+    private fun cancelTouch() {
+        if (!isTouching) return
+        isTouching = false
+        if (lastInjectOk) {
+            injectMotion(MotionEvent.ACTION_CANCEL, currentDownTime, SystemClock.uptimeMillis(),
+                pointerCoords[0].x, pointerCoords[0].y)
+        }
+    }
+
+    private fun injectSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Long, reader: BufferedReader) {
         val startTime = SystemClock.uptimeMillis()
         if (!injectMotion(MotionEvent.ACTION_DOWN, startTime, startTime, x1, y1)) {
             execInputFallback("input", "swipe", x1.toInt().toString(), y1.toInt().toString(), x2.toInt().toString(), y2.toInt().toString(), duration.toString())
@@ -346,7 +370,9 @@ object RootInputServer {
         }
         val steps = (duration / 16).toInt().coerceAtLeast(4)
         for (i in 1..steps) {
-            try { Thread.sleep(duration / steps) } catch (ignored: Throwable) {}
+            if (!reader.ready()) {
+                Thread.sleep(duration / steps)
+            }
             val progress = i.toFloat() / steps
             val cx = x1 + (x2 - x1) * progress
             val cy = y1 + (y2 - y1) * progress
