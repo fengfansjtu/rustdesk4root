@@ -126,6 +126,11 @@ jobs:
           targets: aarch64-linux-android
           components: "rustfmt"
 
+      - name: Test Android video frame handoff
+        run: |
+          rustc --edition=2018 --test libs/scrap/src/android/video_frame.rs -o /tmp/android-video-frame-tests
+          /tmp/android-video-frame-tests
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:

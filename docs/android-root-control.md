@@ -67,6 +67,35 @@ continuous drags, and a deliberate hold followed by a drag. Check both idle inpu
 and input immediately after scrolling. The three JVM queue regression tests run in
 the ARM64 workflow; real-device gesture recognition still needs verification.
 
+## Unlocked-screen latency fixes
+
+Android's Image plane buffer becomes invalid when the Image is closed. Previously
+the JNI video callback stored only its address, then `Image.use` closed the Image
+before the Rust encoder read it. The video handoff now owns the pixels before
+returning to Android. Explicit width, height, and row stride remove the previous
+stride guess from buffer capacity, including devices whose final row has no mapped
+padding. See [Android Image.close](https://developer.android.com/reference/android/media/Image#close()).
+
+The handoff has one pending frame and reuses its allocations. While the encoder is
+busy, additional producer frames are skipped before copying; the existing 100 ms
+age limit lets fresh frames replace an expired pending frame. The consumer swaps
+buffers instead of making a second output copy. `update`, `take`, and `set_enable`
+are the only state readers/writers, all under the existing video mutex. Audio's
+raw-frame path and the shared capturer interface are unchanged.
+
+The ImageReader callback uses the existing lock-screen-active flag instead of
+issuing KeyguardManager/PowerManager IPC on every frame. Screen broadcasts and the
+existing watchdog maintain lock-screen capture. Pure root pointer moves bypass
+the wake/lock-screen checks and daemon-start lock; presses, releases, keyboard,
+screen broadcasts, and the watchdog retain their checks. Hovering alone no longer
+wakes a sleeping device.
+
+Three Rust regressions cover source reuse, row padding/truncation, and slow-consumer
+handoff. They also compile in ordinary workspace tests and run before native APK
+compilation. Measure FPS, codec, transport, and latency on the actual Android 16
+device before attributing all observed lag to these bugs: relay bandwidth and
+software encoding can still limit performance.
+
 ## Known limits
 
 - Compilation does not verify OEM root policies or event injection on real devices.
@@ -86,7 +115,11 @@ the ARM64 workflow; real-device gesture recognition still needs verification.
 ## Regression surface
 
 - `MainActivity.kt`: mode-specific input status, daemon startup, and root stop hook.
-- `MainService.kt`: root pointer/key entry points reject disabled or unavailable root.
+- `MainService.kt`: root input guards and move fast path; video handoff metadata;
+  existing lock-screen state used by the frame callback to avoid per-frame IPC.
+- `ffi.kt` and `libs/scrap/src/android/ffi.rs`: matching Android-only video JNI
+  parameters and an owned-video handoff while Image memory remains valid.
+- `libs/scrap/src/lib.rs`: Android/test-only module hook for the video handoff.
 - `RootInputManager.kt`: root defaults, authorization, worker/shell lifecycle, and
   root event dispatch.
 - `RootInputServer.kt`: root-only injection overload selection and event handling.
@@ -95,5 +128,5 @@ the ARM64 workflow; real-device gesture recognition still needs verification.
 - `app/build.gradle` and `build-android-arm64.yml`: JVM queue tests before artifact
   upload, with JUnit confined to the test configuration.
 
-The explicit accessibility event dispatch implementation, Rust protocol, capture
-implementation, generated bridges, and submodules are unchanged.
+The explicit accessibility input implementation, audio frame path, Rust network
+protocol, codec negotiation, generated bridges, and submodules are unchanged.

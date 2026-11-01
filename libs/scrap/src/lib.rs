@@ -23,4 +23,8 @@ pub mod dxgi;
 #[cfg(target_os = "android")]
 pub mod android;
 
+#[cfg(any(target_os = "android", test))]
+#[path = "android/video_frame.rs"]
+mod android_video_frame;
+
 mod common;

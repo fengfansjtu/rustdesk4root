@@ -9,6 +9,7 @@ use jni::{
     JavaVM,
 };
 
+use crate::android_video_frame::VideoFrame;
 use base::message_proto::MultiClipboards;
 use hbb_common::protobuf::Message;
 use jni::errors::{Error as JniError, Result as JniResult};
@@ -24,7 +25,7 @@ lazy_static! {
     static ref JVM: RwLock<Option<JavaVM>> = RwLock::new(None);
     static ref MAIN_SERVICE_CTX: RwLock<Option<GlobalRef>> = RwLock::new(None); // MainService -> video service / audio service / info
     static ref APPLICATION_CONTEXT: RwLock<Option<GlobalRef>> = RwLock::new(None);
-    static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
+    static ref VIDEO_RAW: Mutex<VideoFrame> = Mutex::new(VideoFrame::new(MAX_VIDEO_FRAME_TIMEOUT));
     static ref AUDIO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("audio", MAX_AUDIO_FRAME_TIMEOUT));
     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
     static ref MEDIA_CODEC_INFOS: RwLock<Option<MediaCodecInfos>> = RwLock::new(None);
@@ -126,11 +127,26 @@ pub extern "system" fn Java_ffi_FFI_onVideoFrameUpdate(
     env: JNIEnv,
     _class: JClass,
     buffer: JObject,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    row_stride: jni::sys::jint,
 ) {
+    if width <= 0 || height <= 0 || row_stride <= 0 {
+        return;
+    }
     let jb = JByteBuffer::from(buffer);
     if let Ok(data) = env.get_direct_buffer_address(&jb) {
         if let Ok(len) = env.get_direct_buffer_capacity(&jb) {
-            VIDEO_RAW.lock().unwrap().update(data, len);
+            // Image.close() invalidates the plane buffer after this JNI call returns.
+            let source = unsafe { std::slice::from_raw_parts(data, len) };
+            if !VIDEO_RAW.lock().unwrap().update(
+                source,
+                width as usize,
+                height as usize,
+                row_stride as usize,
+            ) {
+                log::trace!("Skipped Android video frame: pending frame or invalid layout");
+            }
         }
     }
 }

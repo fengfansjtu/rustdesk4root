@@ -74,8 +74,18 @@ class MainService : Service() {
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
     fun rustPointerInput(kind: Int, mask: Int, x: Int, y: Int) {
-        if (RootInputManager.getInputControlMode(this) == RootInputManager.MODE_ROOT &&
-            !RootInputManager.isRootAvailable()) return
+        val mode = RootInputManager.getInputControlMode(this)
+        if (mode == RootInputManager.MODE_ROOT) {
+            if (!RootInputManager.isRootAvailable()) return
+            if (kind == 1 && (mask == 0 || mask == LEFT_MOVE)) {
+                RootInputManager.onMouseInput(mask, x, y)
+                return
+            }
+            if (kind == 0 && mask == TOUCH_PAN_UPDATE) {
+                RootInputManager.onTouchInput(mask, x, y)
+                return
+            }
+        }
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
         if (!powerManager.isInteractive || isLocked) {
@@ -90,7 +100,6 @@ class MainService : Service() {
             checkAndStartLockscreenCaptureIfNeeded()
         }
 
-        val mode = RootInputManager.getInputControlMode(this)
         if (mode == RootInputManager.MODE_ROOT) {
             RootInputManager.startServer(applicationContext)
             when (kind) {
@@ -475,7 +484,7 @@ class MainService : Service() {
                         scaled.copyPixelsToBuffer(buffer!!)
                         buffer?.rewind()
                         scaled.recycle()
-                        FFI.onVideoFrameUpdate(buffer!!)
+                        FFI.onVideoFrameUpdate(buffer!!, targetW, targetH, targetW * 4)
                         if (frameCount == 0 || frameCount % 5 == 0) {
                             FFI.refreshScreen()
                         }
@@ -724,15 +733,11 @@ class MainService : Service() {
                             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                             image.use { img ->
                                 if (!isStart) return@use
-                                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                                if (keyguardManager?.isKeyguardLocked == true || !powerManager.isInteractive || isLockscreenCaptureActive) {
-                                    checkAndStartLockscreenCaptureIfNeeded()
-                                    if (isLockscreenCaptureActive) return@use
-                                }
+                                if (isLockscreenCaptureActive) return@use
                                 val planes = img.planes
                                 val buffer = planes[0].buffer
                                 buffer.rewind()
-                                FFI.onVideoFrameUpdate(buffer)
+                                FFI.onVideoFrameUpdate(buffer, img.width, img.height, planes[0].rowStride)
                             }
                         } catch (e: Exception) {
                             Log.w(logTag, "onImageAvailable error: ${e.message}")
