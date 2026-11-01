@@ -27,4 +27,8 @@ pub mod android;
 #[path = "android/video_frame.rs"]
 mod android_video_frame;
 
+#[cfg(any(target_os = "android", test))]
+#[path = "android/encoded_frame.rs"]
+mod android_encoded_frame;
+
 mod common;

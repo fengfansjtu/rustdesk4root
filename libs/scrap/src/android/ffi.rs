@@ -207,6 +207,7 @@ pub extern "system" fn Java_ffi_FFI_setFrameRawEnable(
 
 #[no_mangle]
 pub extern "system" fn Java_ffi_FFI_init(env: JNIEnv, _class: JClass, ctx: JObject) {
+    super::surface::reset();
     log::debug!("MainService init from java");
     if let Ok(jvm) = env.get_java_vm() {
         let java_vm = jvm.get_java_vm_pointer() as *mut c_void;
@@ -220,6 +221,73 @@ pub extern "system" fn Java_ffi_FFI_init(env: JNIEnv, _class: JClass, ctx: JObje
             *MAIN_SERVICE_CTX.write().unwrap() = Some(context);
             init_ndk_context(java_vm, context_jobject);
         }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_setSurfaceVideoCapabilities(
+    _env: JNIEnv,
+    _class: JClass,
+    api: jboolean,
+    hw264: jboolean,
+    hw265: jboolean,
+    sw264: jboolean,
+    sw265: jboolean,
+) {
+    super::surface::set_capabilities(api != 0, [hw264 != 0, hw265 != 0, sw264 != 0, sw265 != 0]);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_setSurfaceVideoReady(
+    _env: JNIEnv,
+    _class: JClass,
+    ready: jboolean,
+) {
+    super::surface::set_ready(ready != 0);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_onSurfaceVideoPacket(
+    env: JNIEnv,
+    _class: JClass,
+    session: jni::sys::jlong,
+    data: jni::objects::JByteArray,
+    pts_us: jni::sys::jlong,
+    key: jboolean,
+) -> jboolean {
+    match env.convert_byte_array(&data) {
+        Ok(data) => super::surface::push(session, data, pts_us, key != 0).into(),
+        Err(_) => {
+            super::surface::stopped(session, true);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_onSurfaceVideoStopped(
+    _env: JNIEnv,
+    _class: JClass,
+    session: jni::sys::jlong,
+    failed: jboolean,
+) {
+    super::surface::stopped(session, failed != 0);
+}
+
+pub(crate) fn call_surface_method(name: &str, signature: &str, args: &[JValue]) -> JniResult<bool> {
+    if let (Some(jvm), Some(ctx)) = (
+        JVM.read().unwrap().as_ref(),
+        MAIN_SERVICE_CTX.read().unwrap().as_ref(),
+    ) {
+        let mut env = jvm.attach_current_thread_as_daemon()?;
+        let result =
+            env.with_local_frame(8, |env| env.call_method(ctx, name, signature, args)?.z());
+        if matches!(result, Err(JniError::JavaException)) {
+            env.exception_clear()?;
+        }
+        result
+    } else {
+        Err(JniError::ThrowFailed(-1))
     }
 }
 

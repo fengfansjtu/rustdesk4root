@@ -70,6 +70,77 @@ const val VIDEO_KEY_FRAME_RATE = 30
 class MainService : Service() {
 
     private var lastWakeOrDismissTime = 0L
+    @Volatile
+    private var surfaceVideoEncoder: SurfaceVideoEncoder? = null
+
+    private fun probeSurfaceVideo() {
+        try {
+            val caps = SurfaceVideoEncoder.capabilities(SCREEN_INFO.width, SCREEN_INFO.height)
+            FFI.setSurfaceVideoCapabilities(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q, caps[0], caps[1], caps[2], caps[3])
+        } catch (error: Exception) {
+            Log.w(logTag, "Surface encoder capability query failed", error)
+            FFI.setSurfaceVideoCapabilities(false, false, false, false, false)
+        }
+    }
+
+    private fun updateSurfaceVideoReady() {
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val ready = isStart && virtualDisplay != null && surface != null && powerManager.isInteractive &&
+            keyguard?.isKeyguardLocked != true && !isLockscreenCaptureActive
+        FFI.setSurfaceVideoReady(ready)
+        if (!ready) rustStopSurfaceVideo(0)
+    }
+
+    private fun pauseSurfaceVideo() {
+        FFI.setSurfaceVideoReady(false)
+        rustStopSurfaceVideo(0)
+    }
+
+    @Keep
+    @Synchronized
+    fun rustStartSurfaceVideo(session: Long, codec: Int, width: Int, height: Int, bitrate: Int, fps: Int, hardware: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !isStart ||
+            !powerManager.isInteractive || isLockscreenCaptureActive || virtualDisplay == null ||
+            width != SCREEN_INFO.width || height != SCREEN_INFO.height) return false
+        rustStopSurfaceVideo(0)
+        return try {
+            val encoder = SurfaceVideoEncoder.create(session, codec, width, height, bitrate, fps, hardware)
+            surfaceVideoEncoder = encoder
+            encoder.start()
+            virtualDisplay?.setSurface(encoder.inputSurface)
+            true
+        } catch (error: Exception) {
+            Log.w(logTag, "Surface encoder start failed", error)
+            FFI.onSurfaceVideoStopped(session, true)
+            rustStopSurfaceVideo(session)
+            false
+        }
+    }
+
+    @Keep
+    @Synchronized
+    fun rustUpdateSurfaceVideo(session: Long, bitrate: Int): Boolean {
+        val encoder = surfaceVideoEncoder ?: return false
+        if (encoder.session != session) return false
+        encoder.updateBitrate(bitrate)
+        return true
+    }
+
+    @Keep
+    @Synchronized
+    fun rustStopSurfaceVideo(session: Long): Boolean {
+        val encoder = surfaceVideoEncoder ?: return true
+        if (session != 0L && encoder.session != session) return false
+        surfaceVideoEncoder = null
+        try {
+            virtualDisplay?.setSurface(if (isStart) surface else null)
+        } catch (error: Exception) {
+            Log.w(logTag, "Could not restore raw capture surface", error)
+        } finally {
+            encoder.close()
+        }
+        return true
+    }
 
     @Keep
     @RequiresApi(Build.VERSION_CODES.N)
@@ -329,6 +400,7 @@ class MainService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
+                    pauseSurfaceVideo()
                     Log.d(logTag, "Screen turned OFF (ACTION_SCREEN_OFF)")
                     // Cancel any pending pipeline refresh when screen turns off.
                     // Never recreate ImageReader or surfaces while display is off!
@@ -351,6 +423,7 @@ class MainService : Service() {
                 Intent.ACTION_USER_PRESENT -> {
                     Log.d(logTag, "Device UNLOCKED (ACTION_USER_PRESENT)")
                     stopLockscreenCapture()
+                    updateSurfaceVideoReady()
                     if (isStart) {
                         FFI.refreshScreen()
                     }
@@ -366,7 +439,7 @@ class MainService : Service() {
 
         override fun onResumed() {
             Log.d(logTag, "VirtualDisplay onResumed")
-            if (isStart && powerManager.isInteractive && !isLockscreenCaptureActive) {
+            if (isStart && surfaceVideoEncoder == null && powerManager.isInteractive && !isLockscreenCaptureActive) {
                 FFI.refreshScreen()
             }
         }
@@ -394,6 +467,7 @@ class MainService : Service() {
     private var isLockscreenCaptureActive = false
 
     fun checkAndStartLockscreenCaptureIfNeeded() {
+        updateSurfaceVideoReady()
         if (!isStart) {
             stopLockscreenCapture()
             return
@@ -422,6 +496,7 @@ class MainService : Service() {
         } else {
             stopLockscreenCapture()
         }
+        updateSurfaceVideoReady()
     }
 
     private fun startLockscreenCapture() {
@@ -551,6 +626,7 @@ class MainService : Service() {
             serviceHandler = Handler(looper)
         }
         updateScreenInfo(resources.configuration.orientation)
+        probeSurfaceVideo()
         initNotification()
 
         val filter = IntentFilter().apply {
@@ -572,6 +648,7 @@ class MainService : Service() {
     }
 
     override fun onDestroy() {
+        pauseSurfaceVideo()
         if (screenStateReceiverRegistered) {
             try {
                 unregisterReceiver(screenStateReceiver)
@@ -644,6 +721,7 @@ class MainService : Service() {
                 SCREEN_INFO.height = h
                 SCREEN_INFO.scale = scale
                 SCREEN_INFO.dpi = dpi
+                probeSurfaceVideo()
                 if (isStart) {
                     stopCapture()
                     FFI.refreshScreen()
@@ -944,6 +1022,7 @@ class MainService : Service() {
         captureRestartInVoiceCall = false
         checkMediaPermission()
         _isStart = true
+        updateSurfaceVideoReady()
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
         acquireCpuWakeLock()
@@ -968,6 +1047,7 @@ class MainService : Service() {
 
     @Synchronized
     fun stopCapture() {
+        pauseSurfaceVideo()
         Log.d(logTag, "Stop Capture")
         serviceHandler?.removeCallbacks(lockscreenWatchdogRunnable)
         stopLockscreenCapture()
@@ -1146,6 +1226,7 @@ class MainService : Service() {
         }
 
         Log.d(logTag, "refreshCapturePipeline: recovering VirtualDisplay and ImageReader...")
+        pauseSurfaceVideo()
         try {
             updateScreenInfo(resources.configuration.orientation)
 
@@ -1199,10 +1280,13 @@ class MainService : Service() {
             Log.d(logTag, "refreshCapturePipeline completed successfully")
         } catch (e: Exception) {
             Log.e(logTag, "refreshCapturePipeline encountered error", e)
+        } finally {
+            updateSurfaceVideoReady()
         }
     }
 
     private fun handleVirtualDisplayFailure(): Boolean {
+        pauseSurfaceVideo()
         captureRestartPending = true
         virtualDisplay?.release()
         virtualDisplay = null

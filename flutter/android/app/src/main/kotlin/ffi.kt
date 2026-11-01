@@ -18,6 +18,10 @@ object FFI {
     external fun startServer(app_dir: String, home_dir: String, custom_client_config: String)
     external fun startService()
     external fun onVideoFrameUpdate(buf: ByteBuffer, width: Int, height: Int, rowStride: Int)
+    external fun setSurfaceVideoCapabilities(api: Boolean, hw264: Boolean, hw265: Boolean, sw264: Boolean, sw265: Boolean)
+    external fun setSurfaceVideoReady(ready: Boolean)
+    external fun onSurfaceVideoPacket(session: Long, data: ByteArray, ptsUs: Long, key: Boolean): Boolean
+    external fun onSurfaceVideoStopped(session: Long, failed: Boolean)
     external fun onAudioFrameUpdate(buf: ByteBuffer)
     external fun translateLocale(localeName: String, input: String): String
     external fun refreshScreen()

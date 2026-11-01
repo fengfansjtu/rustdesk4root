@@ -130,6 +130,8 @@ jobs:
         run: |
           rustc --edition=2018 --test libs/scrap/src/android/video_frame.rs -o /tmp/android-video-frame-tests
           /tmp/android-video-frame-tests
+          rustc --edition=2018 --test libs/scrap/src/android/encoded_frame.rs -o /tmp/android-encoded-frame-tests
+          /tmp/android-encoded-frame-tests
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -185,11 +187,11 @@ jobs:
           popd
         shell: bash
 
-      - name: Test root input queue
+      - name: Test root input queue and Surface packets
         working-directory: flutter/android
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-        run: ./gradlew :app:testReleaseUnitTest --tests com.carriez.flutter_hbb.RootInputQueueTest
+        run: ./gradlew :app:testReleaseUnitTest --tests com.carriez.flutter_hbb.RootInputQueueTest --tests com.carriez.flutter_hbb.SurfaceVideoPacketizerTest
 
       - name: Prepare APK for Artifact and Release
         run: |

@@ -230,6 +230,15 @@ impl Encoder {
                     HwRamEncoder::try_get(CodecFormat::H265).map_or(None, |c| Some(c.name));
             }
         }
+        #[cfg(all(target_os = "android", feature = "hwcodec"))]
+        if crate::android::surface::enabled() {
+            h264hw_encoding = (crate::android::surface::ready()
+                && crate::android::surface::supported(&CodecFormat::H264))
+            .then(|| "android_surface".to_owned());
+            h265hw_encoding = (crate::android::surface::ready()
+                && crate::android::surface::supported(&CodecFormat::H265))
+            .then(|| "android_surface".to_owned());
+        }
         let h264_useable =
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
         let h265_useable =
@@ -350,6 +359,11 @@ impl Encoder {
         if enable_vram_option(true) {
             encoding.h264 |= VRamEncoder::available(CodecFormat::H264).len() > 0;
             encoding.h265 |= VRamEncoder::available(CodecFormat::H265).len() > 0;
+        }
+        #[cfg(all(target_os = "android", feature = "hwcodec"))]
+        if crate::android::surface::enabled() {
+            encoding.h264 = crate::android::surface::supported(&CodecFormat::H264);
+            encoding.h265 = crate::android::surface::supported(&CodecFormat::H265);
         }
         encoding
     }

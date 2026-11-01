@@ -65,6 +65,8 @@ use std::{
 pub const OPTION_REFRESH: &'static str = "refresh";
 
 mod static_refresh;
+#[cfg(all(target_os = "android", feature = "hwcodec"))]
+mod android_surface;
 
 #[cfg(windows)]
 const DXGI_RECOVERY_LIMIT: usize = 3;
@@ -596,6 +598,10 @@ fn get_capturer(
 
 fn run(vs: VideoService) -> ResultType<()> {
     let mut _raii = Raii::new(vs.idx, vs.sp.name());
+    #[cfg(all(target_os = "android", feature = "hwcodec"))]
+    if let Some(result) = android_surface::run_if_supported(&vs) {
+        return result;
+    }
     // Wayland only support one video capturer for now. It is ok to call ensure_inited() here.
     //
     // ensure_inited() is needed because clear() may be called.
