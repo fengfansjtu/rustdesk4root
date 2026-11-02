@@ -12,6 +12,7 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 
 import './gestures.dart';
+import './android_touch_region.dart';
 
 class RawKeyFocusScope extends StatelessWidget {
   final FocusNode? focusNode;
@@ -119,6 +120,34 @@ class _RawTouchGestureDetectorRegionState
 
   @override
   Widget build(BuildContext context) {
+    if (isMobile &&
+        ffiModel.isPeerAndroid &&
+        ffiModel.touchMode &&
+        !widget.isCamera &&
+        !inputModel.relativeMouseMode.value) {
+      return AndroidTouchRegion(
+        key: ValueKey(sessionId),
+        canStart: (event) {
+          lastDeviceKind = event.kind;
+          return inputModel.keyboardPerm &&
+              !inputModel.isViewOnly &&
+              !ffi.cursorModel.shouldBlock(
+                  event.localPosition.dx, event.localPosition.dy) &&
+              ffi.cursorModel.isInRemoteRect(event.localPosition);
+        },
+        onDown: (position) async {
+          await ffi.cursorModel.move(position.dx, position.dy);
+          await inputModel.sendMouse('down', MouseButtons.left);
+        },
+        onMove: (position) async {
+          await ffi.cursorModel.move(position.dx, position.dy);
+        },
+        onUp: () => inputModel.sendMouse('up', MouseButtons.left),
+        onScaleUpdate: onTwoFingerScaleUpdate,
+        onScaleEnd: (_) => _scale = 1,
+        child: widget.child,
+      );
+    }
     return RawGestureDetector(
       child: widget.child,
       gestures: makeGestures(context),

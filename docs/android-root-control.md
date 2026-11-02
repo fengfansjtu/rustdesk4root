@@ -67,6 +67,39 @@ continuous drags, and a deliberate hold followed by a drag. Check both idle inpu
 and input immediately after scrolling. The three JVM queue regression tests run in
 the ARM64 workflow; real-device gesture recognition still needs verification.
 
+## Mobile controller touch input
+
+Install this update on the phone initiating control and select touch mode. For a
+mobile controller connected to Android, a separate pointer region now forwards
+physical down/move/up events. It avoids the legacy recognizer's 200 ms retained
+pan state, synthetic tap/long-press downs, and asynchronous pan-start callbacks.
+Each physical stroke has one press and one release. Bridge operations run in
+order; consecutive waiting moves share one latest position without crossing a
+press/release boundary. Pointer cancellation and widget removal enqueue a release.
+
+When a second finger arrives, the remote single-finger stroke ends; two-finger
+gestures continue to zoom/pan the local canvas. The remaining held finger does
+not resume remote input until all fingers lift and a new stroke begins. Native
+multi-touch injection is not introduced by this change.
+
+The new region keeps hit/permission checks and the existing canvas coordinate
+mapping. Desktop controllers, mobile mouse/relative mode, cameras, and non-Android
+peers retain their existing implementation. The controlled phone's root daemon,
+video backend, Rust network protocol and generated bridges are unchanged here.
+
+Three VM/widget regressions cover consecutive swipes while a bridge call is
+pending, tap/hold press counts, and cancellation/pinch/disposal. They run in the
+ARM64 workflow before APK compilation. Local validation uses the same Flutter
+3.24.5 SDK, with the actual new widget/test in a temporary minimal package; the
+complete application build and Android 16 device verification remain in CI/on
+device. In particular, repeat upward/downward swipes, quick flicks, rapid taps,
+hold-and-drag, and cancellation while screen sharing is active.
+
+Regression surface for this fix: `remote_input.dart` adds a gated mobile-to-Android
+touch-region selection in the existing widget's build method; all implementation
+state is in the new `android_touch_region.dart`. The ARM64 workflow adds the three
+Flutter tests. These hooks are needed to select and verify the new controller path.
+
 ## Unlocked-screen latency fixes
 
 Android's Image plane buffer becomes invalid when the Image is closed. Previously
