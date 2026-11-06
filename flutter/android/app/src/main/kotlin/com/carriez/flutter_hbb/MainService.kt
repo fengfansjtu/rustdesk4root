@@ -107,6 +107,7 @@ class MainService : Service() {
             val encoder = SurfaceVideoEncoder.create(session, codec, width, height, bitrate, fps, hardware)
             surfaceVideoEncoder = encoder
             encoder.start()
+            virtualDisplay?.resize(width, height, SCREEN_INFO.dpi)
             virtualDisplay?.setSurface(encoder.inputSurface)
             true
         } catch (error: Exception) {

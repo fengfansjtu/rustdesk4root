@@ -143,6 +143,7 @@ class _RawTouchGestureDetectorRegionState
           await ffi.cursorModel.move(position.dx, position.dy);
         },
         onUp: () => inputModel.sendMouse('up', MouseButtons.left),
+        onScaleStart: (_) => _scale = 1,
         onScaleUpdate: onTwoFingerScaleUpdate,
         onScaleEnd: (_) => _scale = 1,
         child: widget.child,

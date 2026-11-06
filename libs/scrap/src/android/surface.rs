@@ -23,6 +23,7 @@ struct State {
     api: bool,
     capabilities: [bool; 4],
     ready: bool,
+    raw_override: bool,
     mode: Mode,
     session: i64,
     hardware: bool,
@@ -36,6 +37,7 @@ impl Default for State {
             api: false,
             capabilities: [false; 4],
             ready: false,
+            raw_override: false,
             mode: Mode::Hardware,
             session: 0,
             hardware: false,
@@ -81,6 +83,10 @@ pub(crate) fn set_capabilities(api: bool, capabilities: [bool; 4]) {
         let changed = state.api != api || state.capabilities != capabilities;
         state.api = api;
         state.capabilities = capabilities;
+        if changed {
+            state.mode = Mode::Hardware;
+            state.raw_override = false;
+        }
         changed
     };
     if changed {
@@ -92,6 +98,10 @@ pub(crate) fn set_ready(ready: bool) {
     let changed = {
         let mut state = STATE.lock().unwrap();
         let changed = state.ready != ready;
+        if ready && !state.ready {
+            state.mode = Mode::Hardware;
+            state.raw_override = false;
+        }
         state.ready = ready;
         changed
     };
@@ -106,12 +116,31 @@ pub fn enabled() -> bool {
 
 pub fn ready() -> bool {
     let state = STATE.lock().unwrap();
-    state.api && state.ready && state.mode != Mode::Raw
+    state.api && state.ready && !state.raw_override && state.mode != Mode::Raw
 }
 
 pub fn use_raw() {
-    STATE.lock().unwrap().mode = Mode::Raw;
-    renegotiate();
+    let changed = {
+        let mut state = STATE.lock().unwrap();
+        let changed = !state.raw_override;
+        state.raw_override = true;
+        changed
+    };
+    if changed {
+        renegotiate();
+    }
+}
+
+pub fn restore_after_raw() {
+    let changed = {
+        let mut state = STATE.lock().unwrap();
+        let changed = state.raw_override;
+        state.raw_override = false;
+        changed
+    };
+    if changed {
+        renegotiate();
+    }
 }
 
 pub fn supported(format: &CodecFormat) -> bool {
@@ -122,6 +151,7 @@ pub fn supported(format: &CodecFormat) -> bool {
     let state = STATE.lock().unwrap();
     cfg!(feature = "hwcodec")
         && state.api
+        && !state.raw_override
         && state.mode != Mode::Raw
         && ((hardware && state.mode == Mode::Hardware && state.capabilities[index])
             || state.capabilities[index + 2])

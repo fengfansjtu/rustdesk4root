@@ -11,6 +11,7 @@ class AndroidTouchRegion extends StatefulWidget {
     required this.onDown,
     required this.onMove,
     required this.onUp,
+    this.onScaleStart,
     required this.onScaleUpdate,
     required this.onScaleEnd,
     required this.child,
@@ -20,6 +21,7 @@ class AndroidTouchRegion extends StatefulWidget {
   final AsyncValueSetter<Offset> onDown;
   final AsyncValueSetter<Offset> onMove;
   final AsyncCallback onUp;
+  final GestureScaleStartCallback? onScaleStart;
   final GestureScaleUpdateCallback onScaleUpdate;
   final GestureScaleEndCallback onScaleEnd;
   final Widget child;
@@ -118,6 +120,7 @@ class _AndroidTouchRegionState extends State<AndroidTouchRegion> {
         onPointerUp: _up,
         onPointerCancel: _cancel,
         child: GestureDetector(
+          onScaleStart: widget.onScaleStart,
           onScaleUpdate: (details) {
             if (details.pointerCount > 1) widget.onScaleUpdate(details);
           },

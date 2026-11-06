@@ -360,6 +360,20 @@ object RootInputManager {
             return
         }
 
+        if (mask == MOUSE_TYPE_WHEEL) {
+            if (_y == 0) return
+            val step = MOUSE_WHEEL_STEP * getScale()
+            if (curY < step) return
+            val deltaY = if (_y < 0) -step else step
+            val targetY = max(0, curY + deltaY)
+            if (isServerReady) {
+                enqueueCmd("S $curX $curY $curX $targetY 60")
+            } else {
+                execRootCmd("input swipe $curX $curY $curX $targetY 60")
+            }
+            return
+        }
+
         if (mask == WHEEL_DOWN) {
             if (curY < 120) return
             val targetY = max(0, curY - 120)
@@ -406,8 +420,10 @@ object RootInputManager {
                 }
             }
             TOUCH_PAN_UPDATE -> {
-                curX = max(0, curX - _x * scale)
-                curY = max(0, curY - _y * scale)
+                val maxX = if (SCREEN_INFO.width > 0) SCREEN_INFO.width * scale - 1 else Int.MAX_VALUE
+                val maxY = if (SCREEN_INFO.height > 0) SCREEN_INFO.height * scale - 1 else Int.MAX_VALUE
+                curX = max(0, kotlin.math.min(maxX, curX - _x * scale))
+                curY = max(0, kotlin.math.min(maxY, curY - _y * scale))
                 if (isServerReady && wasServerTouchDownSent) {
                     enqueueCmd("M $curX $curY")
                 }

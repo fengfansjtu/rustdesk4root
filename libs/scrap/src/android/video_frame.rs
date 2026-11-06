@@ -70,7 +70,9 @@ impl VideoFrame {
             return None;
         }
         self.ready = false;
-        if self.updated.elapsed() > self.timeout || self.data == *last {
+        if self.updated.elapsed() > self.timeout.max(Duration::from_millis(500))
+            || self.data == *last
+        {
             return None;
         }
         last.clear();

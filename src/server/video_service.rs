@@ -867,6 +867,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                         std::thread::spawn(move || {
                             handle_screenshot(screenshot, msg, w, h, data);
                         });
+                        #[cfg(all(target_os = "android", feature = "hwcodec"))]
+                        scrap::android::surface::restore_after_raw();
                         if restore_vram {
                             bail!("SWITCH");
                         }
