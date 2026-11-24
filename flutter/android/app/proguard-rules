@@ -14,3 +14,15 @@
 -keep public class com.carriez.flutter_hbb.RootInputManager {
     public *;
 }
+-keep class com.carriez.flutter_hbb.RootVideoClient {
+    *;
+}
+-keep class com.carriez.flutter_hbb.SurfaceVideoPacketizer {
+    *;
+}
+-keep class com.carriez.flutter_hbb.SurfaceCodecFactory {
+    *;
+}
+-keep class com.carriez.flutter_hbb.OpenedSurfaceCodec {
+    *;
+}

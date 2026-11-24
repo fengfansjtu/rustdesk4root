@@ -223,7 +223,9 @@ jobs:
             ### 📱 RustDesk Android 64-bit (arm64-v8a) Root 增强版
             
             - **目标架构**：`arm64-v8a` (64 位 Android)
-            - **无障碍脱离**：通过底层 Root 管道直接注入事件，无需开启系统无障碍服务，永不被系统查杀
-            - **锁屏远程控制**：连接或操作时自动唤醒屏幕并拉起锁屏密码盘，可直接远程输入 PIN 码或九宫格解锁
-            - **静默录屏授权**：自动授权 `PROJECT_MEDIA allow`，适配无人值守场景
+            - **特权虚拟屏 60fps 硬编推流**：通过 Root 守护进程直接创建系统级 `VirtualDisplay` + `MediaCodec`（H264/H265）并通过本地回环 Token 鉴权通道输出，锁屏界面亦可 60fps 流畅硬件直出（不支持的 ROM 自动无缝回退 `MediaProjection` + `screencap`）
+            - **低延迟与 BT.709 色彩优化**：固定 BT.709 SDR 色彩空间、显式关闭 B 帧、启用低延迟模式及 `max-fps-to-encoder` 高刷限帧
+            - **无障碍脱离与注入诊断**：通过底层 Root 管道直接注入 `SOURCE_TOUCHSCREEN` / `KeyEvent`，不依赖系统无障碍，MIUI/HyperOS 注入受阻时自动提示开启安全调试选项
+            - **真·息屏保活与防断连**：内置物理面板电源控制能力（Android 15+ `requestDisplayPower` / `SurfaceControl`）与 `WIFI_MODE_FULL_HIGH_PERF` 高性能 Wi-Fi 锁，防止熄屏后断连
+            - **静默权限授权**：启动时自动授予 `PROJECT_MEDIA` 与 `READ_CLIPBOARD_IN_BACKGROUND`，适配无人值守场景
             - **控制端兼容性**：控制端使用 RustDesk 官方正式版即可，无需特殊客户端

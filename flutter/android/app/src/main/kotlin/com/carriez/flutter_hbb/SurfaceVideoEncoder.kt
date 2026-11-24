@@ -99,65 +99,93 @@ internal class SurfaceVideoEncoder private constructor(
     companion object {
         private const val TAG = "SurfaceVideoEncoder"
 
-        fun capabilities(width: Int, height: Int): BooleanArray {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return BooleanArray(4)
-            return booleanArrayOf(
-                candidates(0, width, height, true).isNotEmpty(),
-                candidates(1, width, height, true).isNotEmpty(),
-                candidates(0, width, height, false).isNotEmpty(),
-                candidates(1, width, height, false).isNotEmpty()
-            )
-        }
-
-        private fun mime(codec: Int) = if (codec == 0) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
-
-        private fun candidates(codec: Int, width: Int, height: Int, hardware: Boolean): List<MediaCodecInfo> {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
-            return MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
-                try {
-                    info.isEncoder && (if (hardware) info.isHardwareAccelerated else info.isSoftwareOnly) &&
-                        info.supportedTypes.any { it.equals(mime(codec), true) } &&
-                        info.getCapabilitiesForType(mime(codec)).let { caps ->
-                            caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
-                                caps.videoCapabilities?.isSizeSupported(width, height) == true
-                        }
-                } catch (_: IllegalArgumentException) { false }
-            }
-        }
+        fun capabilities(width: Int, height: Int): BooleanArray =
+            SurfaceCodecFactory.capabilities(width, height)
 
         fun create(session: Long, format: Int, width: Int, height: Int, bitrate: Int, fps: Int, hardware: Boolean): SurfaceVideoEncoder {
-            var lastError: Exception = IllegalStateException("No compatible Surface encoder")
-            for (info in candidates(format, width, height, hardware)) {
-                var codec: MediaCodec? = null
-                var surface: Surface? = null
-                try {
-                    val caps = checkNotNull(info.getCapabilitiesForType(mime(format)).videoCapabilities)
-                    val targetBitrate = caps.bitrateRange.clamp(bitrate)
-                    val targetFps = fps.coerceIn(1, 60).toDouble().coerceAtMost(caps.getSupportedFrameRatesFor(width, height).upper)
-                    val mediaFormat = MediaFormat.createVideoFormat(mime(format), width, height).apply {
-                        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                        setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate)
-                        setInteger(MediaFormat.KEY_FRAME_RATE, targetFps.toInt().coerceAtLeast(1))
-                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                        setInteger(MediaFormat.KEY_PRIORITY, 0)
-                        setInteger(MediaFormat.KEY_LATENCY, 1)
-                        setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100000L)
-                        setFloat("max-fps-to-encoder", targetFps.toFloat())
-                    }
-                    codec = MediaCodec.createByCodecName(info.name)
-                    codec.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    surface = codec.createInputSurface()
-                    codec.start()
-                    Log.i(TAG, "Using ${info.name}, ${width}x$height, fps=$targetFps, hardware=$hardware")
-                    return SurfaceVideoEncoder(session, codec, surface, targetBitrate, caps.bitrateRange)
-                } catch (error: Exception) {
-                    lastError = error
-                    surface?.release()
-                    try { codec?.release() } catch (releaseError: Exception) { Log.w(TAG, "Encoder release failed", releaseError) }
-                }
-            }
-            throw lastError
+            val opened = SurfaceCodecFactory.open(format, width, height, bitrate, fps, hardware)
+            return SurfaceVideoEncoder(session, opened.codec, opened.inputSurface, opened.bitrate, opened.bitrateRange)
         }
+    }
+}
+
+internal data class OpenedSurfaceCodec(
+    val codec: MediaCodec,
+    val inputSurface: Surface,
+    val bitrate: Int,
+    val bitrateRange: android.util.Range<Int>
+)
+
+internal object SurfaceCodecFactory {
+    private const val TAG = "SurfaceCodecFactory"
+
+    fun capabilities(width: Int, height: Int): BooleanArray {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return BooleanArray(4)
+        return booleanArrayOf(
+            candidates(0, width, height, true).isNotEmpty(),
+            candidates(1, width, height, true).isNotEmpty(),
+            candidates(0, width, height, false).isNotEmpty(),
+            candidates(1, width, height, false).isNotEmpty()
+        )
+    }
+
+    private fun mime(codec: Int) = if (codec == 0) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
+
+    private fun candidates(codec: Int, width: Int, height: Int, hardware: Boolean): List<MediaCodecInfo> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
+        return MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
+            try {
+                info.isEncoder && (if (hardware) info.isHardwareAccelerated else info.isSoftwareOnly) &&
+                    info.supportedTypes.any { it.equals(mime(codec), true) } &&
+                    info.getCapabilitiesForType(mime(codec)).let { caps ->
+                        caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
+                            caps.videoCapabilities?.isSizeSupported(width, height) == true
+                    }
+            } catch (_: IllegalArgumentException) { false }
+        }
+    }
+
+    fun open(format: Int, width: Int, height: Int, bitrate: Int, fps: Int, hardware: Boolean): OpenedSurfaceCodec {
+        var lastError: Exception = IllegalStateException("No compatible Surface encoder")
+        for (info in candidates(format, width, height, hardware)) {
+            var codec: MediaCodec? = null
+            var surface: Surface? = null
+            try {
+                val caps = checkNotNull(info.getCapabilitiesForType(mime(format)).videoCapabilities)
+                val targetBitrate = caps.bitrateRange.clamp(bitrate)
+                val targetFps = fps.coerceIn(1, 60).toDouble().coerceAtMost(caps.getSupportedFrameRatesFor(width, height).upper)
+                val mediaFormat = MediaFormat.createVideoFormat(mime(format), width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, targetFps.toInt().coerceAtLeast(1))
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                    setInteger(MediaFormat.KEY_PRIORITY, 0)
+                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100000L)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                        setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                        setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                        setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, targetFps.toFloat())
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        setInteger(MediaFormat.KEY_LATENCY, 1)
+                    }
+                }
+                codec = MediaCodec.createByCodecName(info.name)
+                codec.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                surface = codec.createInputSurface()
+                codec.start()
+                Log.i(TAG, "Using ${info.name}, ${width}x$height, fps=$targetFps, hardware=$hardware")
+                return OpenedSurfaceCodec(codec, surface, targetBitrate, caps.bitrateRange)
+            } catch (error: Exception) {
+                lastError = error
+                surface?.release()
+                try { codec?.release() } catch (releaseError: Exception) { Log.w(TAG, "Encoder release failed", releaseError) }
+            }
+        }
+        throw lastError
     }
 }

@@ -32,6 +32,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.*
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.util.Log
@@ -72,6 +73,8 @@ class MainService : Service() {
     private var lastWakeOrDismissTime = 0L
     @Volatile
     private var surfaceVideoEncoder: SurfaceVideoEncoder? = null
+    @Volatile
+    private var rootVideoClient: RootVideoClient? = null
 
     private fun probeSurfaceVideo() {
         try {
@@ -85,8 +88,10 @@ class MainService : Service() {
 
     private fun updateSurfaceVideoReady() {
         val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        val ready = isStart && virtualDisplay != null && surface != null && powerManager.isInteractive &&
+        val privilegedReady = RootInputManager.isPrivilegedVideoReady()
+        val projectionReady = virtualDisplay != null && surface != null &&
             keyguard?.isKeyguardLocked != true && !isLockscreenCaptureActive
+        val ready = isStart && powerManager.isInteractive && (privilegedReady || projectionReady)
         FFI.setSurfaceVideoReady(ready)
         if (!ready) rustStopSurfaceVideo(0)
     }
@@ -100,9 +105,43 @@ class MainService : Service() {
     @Synchronized
     fun rustStartSurfaceVideo(session: Long, codec: Int, width: Int, height: Int, bitrate: Int, fps: Int, hardware: Boolean): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !isStart ||
-            !powerManager.isInteractive || isLockscreenCaptureActive || virtualDisplay == null ||
-            width != SCREEN_INFO.width || height != SCREEN_INFO.height) return false
+            !powerManager.isInteractive || width != SCREEN_INFO.width || height != SCREEN_INFO.height) {
+            return false
+        }
+        val endpoint = RootInputManager.getVideoEndpoint()
+        if (endpoint == null && (isLockscreenCaptureActive || virtualDisplay == null)) {
+            return false
+        }
         rustStopSurfaceVideo(0)
+        if (endpoint != null) {
+            try {
+                val client = RootVideoClient.start(
+                    endpoint.first,
+                    endpoint.second,
+                    session,
+                    codec,
+                    width,
+                    height,
+                    SCREEN_INFO.dpi,
+                    bitrate,
+                    fps,
+                    hardware,
+                )
+                rootVideoClient = client
+                runCatching { virtualDisplay?.setSurface(null) }
+                return true
+            } catch (error: PrivilegedVideoUnavailableException) {
+                Log.w(logTag, "Privileged VirtualDisplay unavailable, falling back to MediaProjection", error)
+                RootInputManager.markPrivilegedVideoUnavailable()
+                checkAndStartLockscreenCaptureIfNeeded()
+            } catch (error: Exception) {
+                Log.w(logTag, "Privileged Surface encoder start failed, falling back to MediaProjection", error)
+            }
+        }
+        if (isLockscreenCaptureActive || virtualDisplay == null) {
+            FFI.onSurfaceVideoStopped(session, true)
+            return false
+        }
         return try {
             val encoder = SurfaceVideoEncoder.create(session, codec, width, height, bitrate, fps, hardware)
             surfaceVideoEncoder = encoder
@@ -121,6 +160,12 @@ class MainService : Service() {
     @Keep
     @Synchronized
     fun rustUpdateSurfaceVideo(session: Long, bitrate: Int): Boolean {
+        val client = rootVideoClient
+        if (client != null) {
+            if (client.session != session) return false
+            client.updateBitrate(bitrate)
+            return true
+        }
         val encoder = surfaceVideoEncoder ?: return false
         if (encoder.session != session) return false
         encoder.updateBitrate(bitrate)
@@ -130,6 +175,19 @@ class MainService : Service() {
     @Keep
     @Synchronized
     fun rustStopSurfaceVideo(session: Long): Boolean {
+        val client = rootVideoClient
+        if (client != null) {
+            if (session != 0L && client.session != session) return false
+            rootVideoClient = null
+            try {
+                virtualDisplay?.setSurface(if (isStart) surface else null)
+            } catch (error: Exception) {
+                Log.w(logTag, "Could not restore raw capture surface", error)
+            } finally {
+                client.close()
+            }
+            return true
+        }
         val encoder = surfaceVideoEncoder ?: return true
         if (session != 0L && encoder.session != session) return false
         surfaceVideoEncoder = null
@@ -385,6 +443,7 @@ class MainService : Service() {
     private lateinit var notificationBuilder: NotificationCompat.Builder
 
     private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var screenStateReceiverRegistered = false
 
     private var lastRefreshPipelineTime = 0L
@@ -440,7 +499,9 @@ class MainService : Service() {
 
         override fun onResumed() {
             Log.d(logTag, "VirtualDisplay onResumed")
-            if (isStart && surfaceVideoEncoder == null && powerManager.isInteractive && !isLockscreenCaptureActive) {
+            if (isStart && surfaceVideoEncoder == null && rootVideoClient == null &&
+                powerManager.isInteractive && !isLockscreenCaptureActive
+            ) {
                 FFI.refreshScreen()
             }
         }
@@ -493,7 +554,11 @@ class MainService : Service() {
                 safeAcquireWakeLock(15000)
                 RootInputManager.wakeAndDismissKeyguard()
             }
-            startLockscreenCapture()
+            if (isInteractive && RootInputManager.isPrivilegedVideoReady()) {
+                stopLockscreenCapture()
+            } else {
+                startLockscreenCapture()
+            }
         } else {
             stopLockscreenCapture()
         }
@@ -595,6 +660,17 @@ class MainService : Service() {
             cpuWakeLock?.acquire()
             Log.d(logTag, "Acquired cpuWakeLock for MainService")
         }
+        if (wifiLock == null) {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "rustdesk:service_wifilock")?.apply {
+                setReferenceCounted(false)
+            }
+        }
+        if (wifiLock?.isHeld == false) {
+            runCatching { wifiLock?.acquire() }
+                .onSuccess { Log.d(logTag, "Acquired high-perf wifiLock for MainService") }
+        }
     }
 
     @Synchronized
@@ -603,12 +679,23 @@ class MainService : Service() {
             cpuWakeLock?.release()
             Log.d(logTag, "Released cpuWakeLock")
         }
+        if (wifiLock?.isHeld == true) {
+            runCatching { wifiLock?.release() }
+            Log.d(logTag, "Released wifiLock")
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
         acquireCpuWakeLock()
+        RootInputManager.onServerReadyListener = {
+            serviceHandler?.post {
+                if (isStart) {
+                    checkAndStartLockscreenCaptureIfNeeded()
+                }
+            }
+        }
         RootInputManager.checkRootAsync { isRoot ->
             if (isRoot) {
                 RootInputManager.protectProcessAndWhitelist(applicationContext)
@@ -649,6 +736,8 @@ class MainService : Service() {
     }
 
     override fun onDestroy() {
+        RootInputManager.onServerReadyListener = null
+        RootInputManager.setPhysicalScreenOff(false)
         pauseSurfaceVideo()
         if (screenStateReceiverRegistered) {
             try {
@@ -1048,6 +1137,7 @@ class MainService : Service() {
 
     @Synchronized
     fun stopCapture() {
+        RootInputManager.setPhysicalScreenOff(false)
         pauseSurfaceVideo()
         Log.d(logTag, "Stop Capture")
         serviceHandler?.removeCallbacks(lockscreenWatchdogRunnable)

@@ -12,6 +12,7 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
@@ -53,6 +54,16 @@ object RootInputManager {
     private var isWorkerRunning = false
     @Volatile
     private var isServerReady = false
+    @Volatile
+    private var serverVideoPort = 0
+    @Volatile
+    private var serverToken = ""
+    @Volatile
+    private var privilegedVideoDisabled = false
+    @Volatile
+    private var physicalScreenOff = false
+    @Volatile
+    var onServerReadyListener: (() -> Unit)? = null
     private var serverProcess: Process? = null
     private var serverWriter: BufferedWriter? = null
     private var workerThread: Thread? = null
@@ -168,6 +179,9 @@ object RootInputManager {
                     if (isWorkerRunning) Log.e(TAG, "RootInputServer disconnected, restarting in 1s...", e)
                 } finally {
                     isServerReady = false
+                    serverVideoPort = 0
+                    serverToken = ""
+                    privilegedVideoDisabled = false
                     try { serverProcess?.destroy() } catch (ignored: Throwable) {}
                     try { serverWriter?.close() } catch (ignored: Throwable) {}
                     serverWriter = null
@@ -185,9 +199,45 @@ object RootInputManager {
         workerThread?.start()
     }
 
+    private fun generateToken(): String {
+        val bytes = ByteArray(16)
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    fun getVideoEndpoint(): Pair<Int, String>? {
+        val port = serverVideoPort
+        val token = serverToken
+        return if (isServerReady && !privilegedVideoDisabled && port > 0 && token.isNotEmpty()) {
+            Pair(port, token)
+        } else {
+            null
+        }
+    }
+
+    fun isPrivilegedVideoReady(): Boolean =
+        isServerReady && !privilegedVideoDisabled && serverVideoPort > 0 && serverToken.isNotEmpty()
+
+    fun markPrivilegedVideoUnavailable() {
+        privilegedVideoDisabled = true
+        Log.w(TAG, "Privileged VirtualDisplay marked unavailable for this session; using fallback capture.")
+    }
+
+    fun setPhysicalScreenOff(off: Boolean) {
+        if (!isRootAvailable() || !isServerReady) return
+        if (!off && !physicalScreenOff) return
+        physicalScreenOff = off
+        enqueueCmd(if (off) "P_OFF" else "P_ON")
+    }
+
     private fun launchServerProcess(context: Context) {
         val apkPath = context.packageCodePath
         val className = "com.carriez.flutter_hbb.RootInputServer"
+        val token = generateToken()
+        val pkg = context.packageName
+        serverToken = token
+        serverVideoPort = 0
+        privilegedVideoDisabled = false
         Log.i(TAG, "Launching RootInputServer from $apkPath ...")
 
         val proc = ProcessBuilder("su").redirectErrorStream(false).start()
@@ -201,23 +251,40 @@ object RootInputManager {
             var errLine: String?
             try {
                 while (err.readLine().also { errLine = it } != null) {
-                    Log.e(TAG, "[Server-ERR] $errLine")
+                    if (errLine == "RUSTDESK_ROOT_INPUT_BLOCKED") {
+                        Log.e(
+                            TAG,
+                            "Input injection blocked by SecurityException! On Xiaomi/MIUI/HyperOS, enable 'USB debugging (Security settings)' in Developer Options."
+                        )
+                    } else {
+                        Log.e(TAG, "[Server-ERR] $errLine")
+                    }
                 }
             } catch (ignored: Throwable) {}
         }, "RootInputErrReader").apply { isDaemon = true; start() }
 
-        out.write("export CLASSPATH=\"$apkPath\"; if [ -x /system/bin/app_process64 ]; then exec /system/bin/app_process64 /system/bin $className; elif [ -x /system/bin/app_process ]; then exec /system/bin/app_process /system/bin $className; else exec app_process /system/bin $className; fi\n")
+        val args = "--token=$token --pkg=$pkg"
+        out.write("export CLASSPATH=\"$apkPath\"; if [ -x /system/bin/app_process64 ]; then exec /system/bin/app_process64 /system/bin $className $args; elif [ -x /system/bin/app_process ]; then exec /system/bin/app_process /system/bin $className $args; else exec app_process /system/bin $className $args; fi\n")
         out.flush()
 
         val readThread = Thread({
             try {
                 var line: String?
                 while (inp.readLine().also { line = it } != null) {
+                    if (line?.startsWith("RUSTDESK_ROOT_VIDEO_PORT ") == true) {
+                        val parsedPort = line!!.substringAfter("RUSTDESK_ROOT_VIDEO_PORT ").trim().toIntOrNull() ?: 0
+                        if (parsedPort in 1..65535 && serverProcess === proc) {
+                            serverVideoPort = parsedPort
+                            Log.i(TAG, "Privileged video endpoint ready on loopback port $parsedPort")
+                        }
+                        continue
+                    }
                     Log.d(TAG, "[Server-OUT] $line")
                     if (line == "RUSTDESK_ROOT_SERVER_READY" && isWorkerRunning && serverProcess === proc) {
                         serverWriter = out
                         isServerReady = true
                         Log.i(TAG, "RootInputServer is READY via high-speed anonymous pipe!")
+                        onServerReadyListener?.invoke()
                         break
                     }
                 }
@@ -232,6 +299,8 @@ object RootInputManager {
             try { proc.destroy() } catch (ignored: Throwable) {}
             serverWriter = null
             serverProcess = null
+            serverVideoPort = 0
+            serverToken = ""
             throw RuntimeException("RootInputServer failed to report READY")
         }
     }
@@ -756,6 +825,9 @@ EOF
         serverWriter = null
         serverProcess = null
         isServerReady = false
+        serverVideoPort = 0
+        serverToken = ""
+        privilegedVideoDisabled = false
 
         try {
             suWriter?.close()
